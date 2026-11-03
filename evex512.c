@@ -183,3 +183,145 @@ int memcmp_evex512(const void *pa, const void *pb, size_t n)
     return str_memcmp_large(a, b, n);
 }
 
+
+/* Bit i set when x[i] != y[i] or x[i] == 0: where a comparison stops. */
+static inline unsigned long long stop_mask64(__m512i x, __m512i y)
+{
+    return ~_mm512_mask_cmpeq_epi8_mask(_mm512_test_epi8_mask(x, x), x, y);
+}
+
+/* a 64-aligned and 256 bytes from each pointer inside its page: four blocks
+   at a time, b unaligned. One compare per block for the differences and one
+   test of the bytewise minimum for a NUL; the exact block only on a hit.
+   Elsewhere one masked step up to the next 64-byte boundary of a or the page
+   end of b, whichever is nearer: the lanes beyond it are zero, so the first
+   stop is at most n, and a never-touched next page cannot fault. The first
+   step aligns a, so the loads from a never split a line. */
+int strcmp_tail_evex512(const u8 *a, const u8 *b)
+{
+    /* Two unaligned blocks first: strings up to about 160 bytes end here
+       without the alignment step or the four-block group. */
+    if (page_left(a) >= 128 && page_left(b) >= 128) {
+        unsigned long long m = stop_mask64(load512(a), load512(b));
+        if (m)
+            return byte_diff(a, b, ctz64(m));
+        m = stop_mask64(load512(a + 64), load512(b + 64));
+        if (m)
+            return byte_diff(a, b, 64 + ctz64(m));
+        size_t step = (size_t)(align_down(a, 64) + 128 - a); /* 65..128: a aligned, [a, a+128) done */
+        a += step;
+        b += step;
+    }
+    for (;;) {
+        if (((uintptr_t)a & 63) == 0 && page_left(a) >= 256 && page_left(b) >= 256) {
+            __m512i x0 = load512a(a), x1 = load512a(a + 64), x2 = load512a(a + 128), x3 = load512a(a + 192);
+            __m512i lo = _mm512_min_epu8(_mm512_min_epu8(x0, x1), _mm512_min_epu8(x2, x3));
+            unsigned long long k = _mm512_cmpneq_epi8_mask(x0, load512(b)) | _mm512_cmpneq_epi8_mask(x1, load512(b + 64)) |
+                                   _mm512_cmpneq_epi8_mask(x2, load512(b + 128)) | _mm512_cmpneq_epi8_mask(x3, load512(b + 192)) |
+                                   _mm512_testn_epi8_mask(lo, lo);
+            if (k) {
+                unsigned long long m = stop_mask64(x0, load512(b));
+                if (m) return byte_diff(a, b, ctz64(m));
+                m = stop_mask64(x1, load512(b + 64));
+                if (m) return byte_diff(a, b, 64 + ctz64(m));
+                m = stop_mask64(x2, load512(b + 128));
+                if (m) return byte_diff(a, b, 128 + ctz64(m));
+                return byte_diff(a, b, 192 + ctz64(stop_mask64(x3, load512(b + 192))));
+            }
+            a += 256;
+            b += 256;
+            continue;
+        }
+        size_t n = 64 - ((uintptr_t)a & 63); /* within a's page too */
+        if (page_left(b) < n)
+            n = page_left(b);
+        __mmask64 km = low_mask64(n);
+        unsigned long long m = stop_mask64(mload64(a, km), mload64(b, km));
+        if (m) {
+            size_t i = ctz64(m);
+            if (i < n)
+                return byte_diff(a, b, i);
+        }
+        a += n;
+        b += n;
+    }
+}
+
+/* ---------------------------------------------------------------- strcpy */
+
+/* n <= 128, all n source bytes readable. */
+static inline void copy_le128(u8 *d, const u8 *s, size_t n)
+{
+    if (n <= 64) {
+        __mmask64 k = low_mask64(n);
+        mstore64(d, k, mload64(s, k));
+    } else {
+        __m512i x = load512(s), y = load512(s + n - 64);
+        store512(d, x);
+        store512(d + n - 64, y);
+    }
+}
+
+/* Aligned 64-byte blocks from the one around s: the first two settle the
+   strings up to 128 bytes in one copy; then single blocks to a 256-byte
+   boundary and four at a time (a 256-aligned group never crosses a page),
+   each tested before it is stored. The last 64 bytes of the string go out as
+   one overlapping store ending at the NUL. */
+void *strcpy_long_evex512(u8 *d, const u8 *s)
+{
+    const u8 *a = align_down(s, 64);
+    unsigned long long m = zero_mask64(load512a(a)) >> (s - a);
+    if (m) {
+        copy_le128(d, s, ctz64(m) + 1);
+        RETURN_OPAQUE(d);
+    }
+    a += 64;
+    __m512i x = load512a(a);
+    m = zero_mask64(x);
+    if (m) {
+        copy_le128(d, s, (size_t)(a - s) + ctz64(m) + 1);
+        RETURN_OPAQUE(d);
+    }
+    store512(d, load512(s)); /* [s, s+64) lies within the two blocks checked */
+    store512(d + (a - s), x);
+    a += 64;
+    while ((uintptr_t)a & 255) {
+        x = load512a(a);
+        m = zero_mask64(x);
+        if (m)
+            goto last;
+        store512(d + (a - s), x);
+        a += 64;
+    }
+    for (;;) {
+        __m512i x0 = load512a(a), x1 = load512a(a + 64), x2 = load512a(a + 128), x3 = load512a(a + 192);
+        __m512i lo = _mm512_min_epu8(_mm512_min_epu8(x0, x1), _mm512_min_epu8(x2, x3));
+        if (_mm512_testn_epi8_mask(lo, lo)) {
+            u8 *o = d + (a - s);
+            if ((m = zero_mask64(x0)))
+                goto last;
+            store512(o, x0);
+            a += 64;
+            if ((m = zero_mask64(x1)))
+                goto last;
+            store512(o + 64, x1);
+            a += 64;
+            if ((m = zero_mask64(x2)))
+                goto last;
+            store512(o + 128, x2);
+            a += 64;
+            m = zero_mask64(x3);
+            goto last;
+        }
+        u8 *o = d + (a - s);
+        store512(o, x0);
+        store512(o + 64, x1);
+        store512(o + 128, x2);
+        store512(o + 192, x3);
+        a += 256;
+    }
+last:;
+    const u8 *nul = a + ctz64(m); /* nul >= s + 64 here */
+    store512(d + (nul - s) - 63, load512(nul - 63));
+    RETURN_OPAQUE(d);
+}

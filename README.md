@@ -22,7 +22,8 @@ jumps through the table: `strcat` is `str_strlen` plus `str_strcpy`, a
 64-byte `strlen` first block continues in `str_strlen_tail`, `memmove`
 without overlap is `str_memcpy`. So the slots compose in any mix, and `dispatch.c`
 names a complete table per class of host: 256-bit AVX-512 first blocks over
-the AVX2 kernels on Skylake-SP, 512-bit ones on Zen 4 and later, SSE4.2
+the AVX2 kernels on Skylake-SP, 512-bit ones on Zen 4 and later (with
+512-bit `strcpy_long` and `strcmp_tail`), SSE4.2
 `strspn`/`strcspn` everywhere above the baseline.
 
 Anything that depends on the host is a slot, not a build flag. The post pass
@@ -109,7 +110,8 @@ glibc at 5 bytes: `strlen` 0.86/1.00 on Zen 5 and 0.63/1.00 on Skylake-SP,
 `memcmp` 1.00/1.00 and 0.75/1.00, `strcpy` 1.00/1.00 and 0.89/0.62,
 `strcat` 1.00/0.59 and 0.97/0.86. What is left behind glibc sits at 125
 bytes and beyond, in the AVX2 kernels that every configuration above AVX2
-still uses.
+still uses for copies and `memcmp`; the 512-bit configuration has its own
+`strcpy_long` and `strcmp_tail`.
 
 ## License
 

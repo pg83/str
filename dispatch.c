@@ -66,14 +66,15 @@ const struct str_config str_configs[] = {
     }},
     /* AVX-512 at 512 bits: Zen 4 and 5, Ice Lake and later. The memory functions
        and strlen take one 64-byte block first; strcpy, strcat and strcmp keep
-       the 16-byte first blocks (measured best), the copy and compare kernels
-       stay 32-byte. */
+       the 16-byte first blocks (measured best), their strcpy_long and
+       strcmp_tail kernels are 64-byte; the copy and memcmp kernels stay
+       32-byte. */
     {"evex512", STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS, {
         .memcpy = memcpy_evex512, .memmove = memmove_evex512, .memset = memset_evex512, .memcmp = memcmp_evex512,
         .strlen = strlen_evex512, .strcpy = strcpy_evex, .strcat = strcat_evex, .strcmp = strcmp_evex,
         .strspn = strspn_avx2, .strcspn = strcspn_avx2,
         .copy_large = copy_large_avx2, .fill_large = fill_large_evex512, .memcmp_large = memcmp_large_avx2,
-        .strlen_tail = strlen_tail_evex512, .strcmp_tail = strcmp_tail_avx2, .strcpy_long = strcpy_long_avx2,
+        .strlen_tail = strlen_tail_evex512, .strcmp_tail = strcmp_tail_evex512, .strcpy_long = strcpy_long_evex512,
         .copy_huge = copy_huge_rep, .fill_huge = fill_huge_rep,
     }},
 };

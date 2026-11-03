@@ -168,6 +168,8 @@ size_t strlen_evex512(const char *);
 void *fill_large_evex512(u8 *d, int c, size_t n);
 size_t strlen_tail_evex512(const u8 *a, const u8 *s);
 void *fill_huge_evex512(u8 *d, int c, size_t n);
+int strcmp_tail_evex512(const u8 *a, const u8 *b);
+void *strcpy_long_evex512(u8 *d, const u8 *s);
 
 
 /* The same functions laid out by the post pass with the JCC-erratum padding
