@@ -237,6 +237,28 @@ static void suite(void)
         }
     }
 
+    /* Two strings ending at different distances from their guards: the page
+       checks of the two pointers disagree, near the end of one page and far
+       from the end of the other. */
+    phase = "page offsets";
+    const size_t lens[] = {33, 40, 64, 65, 100, 127, 128, 129, 141, 200, 255, 256, 257, 353, 600, 4100};
+    for (size_t k = 0; k < sizeof lens / sizeof *lens; k++)
+        for (size_t ga_ = 0; ga_ < 320; ga_ += 7)
+            for (size_t gb_ = 0; gb_ < 320; gb_ += 11) {
+                size_t n = lens[k];
+                unsigned char *s = ga + 12288 - ga_ - n - 1, *d = gb + 12288 - gb_ - n - 1;
+                pattern(s, n, (unsigned)(n + ga_));
+                s[n] = 0;
+                memcpy(d, s, n + 1);
+                CHECK(!T->strcmp((char *)s, (char *)d));
+                size_t at = rnd() % n;
+                d[at] = (unsigned char)(d[at] == 0x40 ? 0x41 : 0x40);
+                CHECK(sign(T->strcmp((char *)s, (char *)d)) == sign(strcmp((char *)s, (char *)d)));
+                CHECK(sign(T->strcmp((char *)d, (char *)s)) == sign(strcmp((char *)d, (char *)s)));
+                memset(d, 0x55, n + 1);
+                CHECK(T->strcpy((char *)d, (char *)s) == (char *)d && !memcmp(d, s, n + 1));
+            }
+
     phase = "random";
     unsigned char set[520];
     for (int t = 0; t < 300000; t++) {

@@ -146,16 +146,19 @@ int strcmp_evex(const char *left, const char *right)
                 return byte_diff(a, b, ctz(k));
             return str_strcmp_tail(a + 32, b + 32);
         }
-        /* one of the two is within 32 bytes of its page end: masked loads of the
-           bytes up to the nearer end never touch the next page. The lanes beyond
-           are zero, so the first lane that is not equal-and-nonzero is at most n:
-           an answer before n, else both advance to it and one is at a page start. */
+        /* one of the two may be within 32 bytes of its page end (both_in_page is
+           conservative: both may still have more, so n is at most 32): masked
+           loads of the bytes up to the nearer end never touch the next page. The
+           lanes beyond are zero, so the first lane that is not equal-and-nonzero
+           is at most n: an answer before n, else both advance by n. */
         size_t n = page_left(a) < page_left(b) ? page_left(a) : page_left(b);
+        if (n > 32)
+            n = 32;
         __mmask32 k = low_mask32(n);
         __m256i x = _mm256_maskz_loadu_epi8(k, a);
-        unsigned i = ctz(_mm256_mask_cmpeq_epi8_mask(_mm256_test_epi8_mask(x, x), x, _mm256_maskz_loadu_epi8(k, b)) + 1);
-        if (i < n)
-            return byte_diff(a, b, i);
+        unsigned m = _mm256_mask_cmpeq_epi8_mask(_mm256_test_epi8_mask(x, x), x, _mm256_maskz_loadu_epi8(k, b)) + 1;
+        if (m && ctz(m) < n) /* m == 0: all 32 equal and nonzero, n == 32 */
+            return byte_diff(a, b, ctz(m));
         a += n;
         b += n;
     }
