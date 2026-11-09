@@ -1515,6 +1515,10 @@ class Span(Scan):
                 want = [self.tbyte(const(64, j + k)) for k in range(16)]
                 if all(x is w or x.op == 'ite' and x.args[1] is w for x, w in zip(lo, want)):
                     break  # as the spec has them already
+                # the window must hold a byte of the set before its NUL: past it the claim is empty
+                # (a 1-byte set's needle, its byte 16 times, is "the set's bytes from 16" for any set shorter)
+                if j and prover.solver.check(*st.pc, S.ult(self.L, const(64, j)), timeout=6 * AUX) != 'unsat':
+                    continue
                 bad = S.or_(*[S.and_(S.ule(const(64, j + k), self.L), S.not_(S.eq(x, w))) for k, (x, w) in enumerate(zip(lo, want))])
                 if prover.solver.check(*st.pc, bad, timeout=6 * AUX) == 'unsat':
                     self.canon += 1
@@ -2051,11 +2055,14 @@ class TruffleScan32:
     def c_scan(self, prover, st):
         x = var('cx', 8)
         tables = X.read_vec(st, 'xmm0')[:16] + X.read_vec(st, 'xmm1')[:16]
-        prover.later(prover.prove, st, [('truffle_scan is given from', [S.not_(S.eq(st.gpr['rdi'], self.frm))]),
-                                        ('truffle_scan is given s', [S.not_(S.eq(st.gpr['rsi'], self.sp))]),
-                                        ('truffle_scan is given members', [S.not_(S.eq(S.extract(st.gpr['rdx'], 31, 0), S.zext(self.members, 32)))]),
-                                        ('the stack aligned at the call', [S.not_(S.eq(S.band(st.gpr['rsp'], const(64, 15)), const(64, 8)))]),
-                                        ('the tables say which bytes are in the set', [S.not_(S.eq(truffle_bit(tables, x), self.want(x)))])], self.show())
+        pre = [('truffle_scan is given from', [S.not_(S.eq(st.gpr['rdi'], self.frm))]),
+               ('truffle_scan is given s', [S.not_(S.eq(st.gpr['rsi'], self.sp))]),
+               ('truffle_scan is given members', [S.not_(S.eq(S.extract(st.gpr['rdx'], 31, 0), S.zext(self.members, 32)))]),
+               ('the stack aligned at the call', [S.not_(S.eq(S.band(st.gpr['rsp'], const(64, 15)), const(64, 8)))]),
+               ('the tables say which bytes are in the set', [S.not_(S.eq(truffle_bit(tables, x), self.want(x)))])]
+        if st.gpr['rsp'] is X.RSP0:  # a jump (the tables in the red zone, dead by then): truffle_scan returns to the caller, its answer this one's
+            return tail_call(self, prover, st, pre)
+        prover.later(prover.prove, st, pre, self.show())
         X.call_return(st, self.r, 'c_')
 
     def early(self, a, n):
@@ -2105,7 +2112,7 @@ def moved_by(v, d, step, k):
 def result(args, a, what, paths, obligations, queries, seconds, detail):
     """One line per alignment class for dev/proof/run.py."""
     print('RESULT ' + json.dumps({'func': args.func, 'spec': args.spec, 'max': 'induct' if args.induct else args.max, 'classes': args.classes,
-                                  'align': a, 'result': what,
+                                  'align': a, 'prefix': getattr(args, 'prefix', '') or '', 'result': what,
                                   'paths': paths, 'obligations': obligations, 'queries': queries, 'seconds': round(seconds, 1),
                                   'detail': detail}), flush=True)
 
@@ -2148,8 +2155,15 @@ def check_tail(st, solver):
         v, v0 = st.gpr[r], var('init_' + r, 64)
         if v is not v0 and solver.check(*st.pc, S.not_(S.eq(v, v0))) != 'unsat':
             raise Failure('%s not preserved at the tail call' % r)
-    if st.gpr['rsp'] is not X.RSP0 or X.pop64(st.copy()) is not const(64, X.RET_MARK):
+    if st.gpr['rsp'] is not X.RSP0:
         raise Failure('a tail call with rsp at %r' % st.gpr['rsp'])
+    ret = X.pop64(st.copy())
+    if ret is not const(64, X.RET_MARK):
+        # stores at computed places below rsp since (a frame in the red zone, aligned down): the slot's
+        # bytes read past them are the return address, and the path says the slot is as it was
+        if X.slot_guess(st, st.gpr['rsp']) is not const(64, X.RET_MARK) or \
+                solver.check(*st.pc, S.not_(S.eq(ret, const(64, X.RET_MARK)))) != 'unsat':
+            raise Failure('a tail call with the return address not in its place')
 
 
 class Pool:
@@ -2225,6 +2239,8 @@ class Prover:
         self.best_way = {}  # an obligation written several ways -> the one that proved it last
         self.best_stop = {}  # (an access, its ways) -> the way no_stop_below proved it by last
         self.covered = {}  # id -> a first arrival at a loop's head whose general state's subtree is explored
+        self.prefix = getattr(args, 'prefix', '') or ''  # the first two-way branches' ways this run takes (a split of one proof)
+        self.backs = set()
         self.t0 = time.time()
 
     @property
@@ -2812,6 +2828,8 @@ class Prover:
         self.contracts = self.spec.contracts(self.mach.image, entry) if hasattr(self.spec, 'contracts') else {}
         st = X.fresh_state(entry, params, self.spec.regions, getattr(self.spec, 'aliases', ()))
         st.front_lo = getattr(self.spec, 'front0', None)  # a precondition's: no stop before it
+        if self.prefix:
+            self.backs = X.backward_targets(self.mach.image, entry)
         if self.args.workers > 1:
             self.pool = Pool(self, self.args.workers)
         self.explore(st)
@@ -2852,7 +2870,7 @@ class Prover:
             self.status_thread.start()
 
     def status_loop(self):
-        name = '%s-%s-%s.txt' % (self.args.func, self.args.classes or self.align, self.a)
+        name = '%s-%s-%s-%s%s.txt' % (self.args.func, self.args.spec, self.args.classes or self.align, self.a, '-p' + self.prefix if self.prefix else '')
         while True:
             time.sleep(60)
             now, st = time.time(), self.where
@@ -2868,16 +2886,29 @@ class Prover:
                 pass
 
     def explore(self, st0):
+        """--prefix: a proof split by its paths. At the first two-way branches
+        of a path (before it meets a loop or a contract: the walk's top level)
+        this run takes the way the prefix says, 0 the taken one, 1 the other;
+        a path that meets a loop, a contract or its end before the prefix is
+        used up goes on only where the rest of the prefix is zeros. The
+        prefixes of a length are then a partition of the paths: each
+        explored by one run, every one by some run."""
         work = [st0]
         self.works.append(work)
         targets = self.mach.targets
         report = 'PROVE_STATUS' in os.environ
+        top = len(self.works) == 1 and bool(self.prefix)
         while work:
             st = work.pop()
-            closed = False
+            closed = dropped = False
             while not st.done:
                 if report:
                     self.status(st)
+                if top and not st.free and (st.rip in self.backs or st.rip in self.contracts):
+                    if '1' in self.prefix[st.fork:]:  # another run's
+                        dropped = closed = True
+                        break
+                    st.free = True
                 if st.steps > self.args.steps:
                     raise Failure('a path past %d instructions at %#x' % (self.args.steps, st.rip))
                 if self.args.induct and st.rip in targets:
@@ -2948,6 +2979,17 @@ class Prover:
                 if len(succ) == 1:
                     st = succ[0][0]
                     continue
+                if top and not st.free and len(succ) == 2 and not any(c is S.TRUE or c is S.FALSE for _, c in succ):
+                    s, c = succ[int(self.prefix[st.fork])]
+                    s.fork = st.fork + 1
+                    s.free = s.fork == len(self.prefix)
+                    if self.solver.check(*s.pc, c, loose=True) == 'unsat':  # the prefix's way is dead: no path of this run here
+                        dropped = closed = True
+                        break
+                    s.pc.append(c)
+                    s.trace.append(s.rip)
+                    st = s
+                    continue
                 live = []
                 for s, c in succ:
                     if c is S.FALSE:
@@ -2966,6 +3008,8 @@ class Prover:
                     break
                 st = live[0]
                 work.extend(live[1:])
+            if dropped or (top and not st.free and '1' in self.prefix[st.fork:]):  # another run's path (or none)
+                continue
             self.paths += 1
             if closed:
                 continue
@@ -2989,6 +3033,7 @@ def main():
     ap.add_argument('--classes', type=int, help='the number of alignment classes (a power of two), not align_of\'s')
     ap.add_argument('--workers', type=int, default=int(os.environ.get('PROVE_WORKERS', '1')),
                     help='checking threads, each with its own solvers (1: the walk checks as it goes)')
+    ap.add_argument('--prefix', default='', help='0s and 1s: the ways this run takes at a path\'s first two-way branches (the runs of every prefix of a length: one proof)')
     args = ap.parse_args()
     img = X.Image(args.elf)
     mach = X.Machine(img, bmi=not args.func.startswith(('sse2.', 'sse42.')))

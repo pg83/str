@@ -16,7 +16,7 @@ from -D) go to prove.py; STR_PROOF_NODE_TIMEOUT, seconds, ends a proof that
 takes longer (a failure). The solvers' answers are kept in ~/proof-cache on
 the host (PROVE_CACHE; STR_PROOF_CACHE=0: every query asked). While it runs, prove.py's line a minute on how
 far it is goes to ~/proof-status/ on the host it runs on (PROVE_STATUS:
-<func>-<classes>-<align>.txt), to see from outside where a proof of hours
+<func>-<spec>-<classes>-<align>.txt), to see from outside where a proof of hours
 is. The output: the RESULT line and how the proof ended; the node fails
 unless proved."""
 import argparse

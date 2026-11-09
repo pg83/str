@@ -40,7 +40,7 @@ as the proof_solvers node's outputs; -Dproof_workers, -Dproof_timeout,
 `:N` is how many proofs it runs at once, each of them -Dproof_workers + 1
 solvers busy: lab1's 88 cores with 4 workers, `root@lab1.mesh:17`. The
 longest proofs start first (targets.priority). Each running proof writes a
-line a minute to ~/proof-status/<func>-<classes>-<align>.txt on its host
+line a minute to ~/proof-status/<func>-<spec>-<classes>-<align>.txt on its host
 (PROVE_STATUS); dev/proof/report.py lists what .build/proof/ holds proved
 and what not yet.
 
@@ -116,7 +116,9 @@ any tables: the tables' 32 bytes unknown, a byte's bit in them what "in the
 set" means, members 0 or 1 unknown; one class, one loop by induction: 96 s.
 truffle_scan32: its 33 ways, in each the tables it hands on say of a free
 byte x exactly "x is one of the first count lanes" (or the NUL, for
-members), its other arguments passed on; 5 s. And the caller: at its jump
+members), its other arguments passed on; 5 s (its tables in the red zone
+and a jump to truffle_scan: a tail call, rsp at the return address and the
+path proving the slot's bytes it, the stores having gone below). And the caller: at its jump
 to truffle_scan32, count and the two registers say of a free byte exactly
 what the spec's set does, members the spec's, no stop before from, the
 callee-saved registers as at the entry and rsp at the return address; the
@@ -163,6 +165,14 @@ on with its branch queries; the first failure stops the proof as before.
 8 workers: strcmp sse2 21 to 9.5 s, strlen avx2 355 to 116 s, strcmp avx2
 859 to 316 s, strcpy_long sse2 84 to 48 s.
 
+`--prefix 0110` splits one proof by its paths: at a path's first two-way
+branches (before it meets a loop's head or a contract) the run takes the
+ways the prefix says, 0 the taken one, 1 the other, and a path that meets
+a loop, a contract or its end before the prefix is used up goes on only
+where the rest of it is zeros. The 2^k prefixes of a length k are a
+partition of the paths, so their runs together are the proof (memcmp avx2:
+14 paths and 61 obligations whole, the sum of its eight prefixes').
+
 PROVE_CACHE=dir keeps the solvers' answers across runs, dir/answers.txt, by
 the query's structure (ids aside, the conditions in any order, the
 assumptions among them): a proof cut off by a lost connection, or run again
@@ -172,7 +182,7 @@ nodes keep them in ~/proof-cache on the host; -Dproof_cache=0 asks every
 query, for the last word on a chain.
 
 PROVE_STATUS=dir has a proof write a line a minute to
-dir/<func>-<classes>-<align>.txt: its time, the paths closed, the
+dir/<func>-<spec>-<classes>-<align>[-p<prefix>].txt: its time, the paths closed, the
 obligations, the loops generalized, the ways each walk under way has
 still to take, where it is, the checking threads' backlog.
 
@@ -217,7 +227,11 @@ set up to its NUL), so the loop and its exits meet the spec's terms; with
 16 classes of s (its head's shuffle by s & 15 then a constant) a class of
 strspn avx2 went from 57 paths in 240 s to 91, the one-class tries having
 failed on exactly those exits. A shuffle of a loaded block by a computed
-index is one select at the block's offset plus the index.
+index is one select at the block's offset plus the index. The window from
+16 (the set's second half) is taken only where the path proves the set
+reaches it: a 1-byte set's needle, its byte 16 times, is "the set's bytes
+from 16" for every shorter set, and the needle's lanes became unknown (sse2
+strspn refuted "no match in the iteration" on that).
 
 ## The specs
 

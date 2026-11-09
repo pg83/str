@@ -64,6 +64,8 @@ class State:
         self.cover = []       # writers: (lo, hi, cond) index ranges of the object written right before the stores since
         self.win = {}         # region -> (lo, hi, array): a loop's general memory, the array but in [lo, hi) (offsets)
         self.aliases = []     # (pointer, region, offset): addresses from the pointer are in the region at offset + their distance from it
+        self.fork = 0         # --prefix: the decisions this path took at the first two-way branches
+        self.free = False     # past them (a loop's head, a contract, the prefix used up): every way its own
 
     def copy(self):
         s = State.__new__(State)
@@ -78,6 +80,7 @@ class State:
         s.aliases = self.aliases
         s.pc, s.loads, s.aligned, s.stores, s.trace = list(self.pc), list(self.loads), list(self.aligned), list(self.stores), list(self.trace)
         s.requires = list(self.requires)
+        s.fork, s.free = self.fork, self.free
         return s
 
 
@@ -660,6 +663,34 @@ def lane_conds(st, j, n):
         return None
     km = read_reg(st, k)
     return [S.eq(S.extract(km, i, i), const(1, 1)) for i in range(n)]
+
+
+def backward_targets(image, entry):
+    """The targets of the backward branches within a function in the code
+    reachable from entry: every cycle of a linear layout has one, so a path
+    meets one of them before it goes round any loop."""
+    spans = sorted((a, a + image.sizes.get(n, 0)) for n, a in image.symbols.items() if image.sizes.get(n))
+    def inside(a):
+        lo = max((s for s in spans if s[0] <= a), default=None)
+        return lo if lo is not None and a < lo[1] else None
+    out, seen, todo = set(), set(), [entry]
+    while todo:
+        a = todo.pop()
+        while a not in seen:
+            seen.add(a)
+            j = image.decode(a)
+            if j['mnemonic'] == 'int3':
+                break
+            t = j.get('branch_target')
+            if t is not None:
+                todo.append(t)
+                f = inside(a)
+                if t <= a and f is not None and f[0] <= t:
+                    out.add(t)
+            if j['mnemonic'] in ('ret', 'jmp'):
+                break
+            a += j['len']
+    return out
 
 
 def branch_targets(image):
