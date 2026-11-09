@@ -6,7 +6,7 @@ simplify(fn) runs a worklist over every op until nothing changes. A rule
 returns the value that replaces the op's result, or rewrites the op in
 place; new ops go in front of the op they serve."""
 from .facts import Facts
-from .ir import I1, I64, PTR, SWAP, INVERT, COMMUTATIVE, DIVISIONS, Dominators, signed
+from .ir import I1, I32, I64, PTR, SWAP, INVERT, COMMUTATIVE, DIVISIONS, Dominators, signed
 
 
 def removable(op):
@@ -567,6 +567,13 @@ class Simplifier:
     def vop(self, op):
         name = op.attrs['name']
         args = op.args
+        if name == 'cmpistrc':
+            # the carry is set exactly when the index is below 16: one pcmpistri serves the flag and the index
+            attrs = dict(op.attrs)
+            attrs['name'] = 'cmpistri'
+            idx = self.new(op, 'vop', list(args), I32, **attrs)
+            below = self.new(op, 'icmp', [idx, self.fn.const(I32, 16)], I1, pred='ult')
+            return self.new(op, 'zext', [below], op.ty)      # (the flag was an int)
         if name == 'andnot' and args[0] is args[1]:
             return self.fn.const(op.ty, bytes(op.ty.size))
         if name == 'andnot' and args[0].const is not None and args[0].const == bytes(op.ty.size):

@@ -2,14 +2,16 @@
 from .asm import assemble, order_blocks
 from .frame import frame, vzeroupper
 from .isel import select
-from .mir import Label, Reg, Imm, FLAGS, FLAG_WRITERS
+from .mir import Label, Reg, Imm, Mem, FLAGS, FLAG_WRITERS
 from .regalloc import allocate, dead_code, liveness
 
 FLAG_READERS = {'cmov', 'set', 'adc', 'sbb', 'j'}
 
 
 def peephole(mf):
-    """A zero moved into a 32-bit register where the flags are dead: xor (shorter, no immediate)."""
+    """Where the flags are dead: a zero moved into a 32-bit register is an xor
+    (shorter, no immediate); lea r, [r + c] is add r, c (lea runs on the
+    ports the shuffles want on Intel, add on any)."""
     for b in mf.blocks:
         live = False      # the flags, walking backwards; dead at a block's end (a compare sits with its branch)
         for i in reversed(b.ins):
@@ -20,6 +22,10 @@ def peephole(mf):
             if i.op == 'mov' and not live and len(i.ops) == 2 and isinstance(i.ops[0], Reg) and isinstance(i.ops[1], Imm) \
                     and i.ops[1].value == 0 and i.ops[0].bits == 32:
                 i.op, i.ops, i.acc, i.kind = 'xor', [i.ops[0], Reg(i.ops[0].r, 32)], ['w', 'r'], 'zero'
+            if i.op == 'lea' and not live and len(i.ops) == 2 and isinstance(i.ops[0], Reg) and isinstance(i.ops[1], Mem):
+                m = i.ops[1]
+                if m.index is None and m.sym is None and m.slot is None and m.base == i.ops[0].r and -(1 << 31) <= m.disp < (1 << 31) and m.disp != 0:
+                    i.op, i.ops, i.acc, i.kind = 'add', [i.ops[0], Imm(m.disp, 32)], ['rw', 'r'], None
             if i.op in FLAG_WRITERS or FLAGS in i.imp_def:
                 live = False
 
