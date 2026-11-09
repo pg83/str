@@ -1330,16 +1330,19 @@ static size_t place(int off, size_t len) {
     return (4096 - len % 4096) % 4096;
 }
 
-static const char *spn_sets[] = {"a", " \t\r\n", "abcdefghijklmnop", "abcdefghijklmnopqrstuvwxyz012345"};
-static const char *cspn_sets[] = {",", ",;=\t", "!\"#$%&'()*+,-./:", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ "};
-static const char *set_names[] = {"set_1", "set_4", "set_16", "set_32"};
+static const char *spn_sets[] = {"a", " \t\r\n", "abcdefghijklmnop", "abcdefghijklmnopqrstuvwxyz012345",
+                                 "abcdefghijklmnopqrstuvwx", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"};
+static const char *cspn_sets[] = {",", ",;=\t", "!\"#$%&'()*+,-./:", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ ",
+                                  "!\"#$%&'()*+,-./:;<=>?@[\\", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ 0123456"};
+/* 24 and 40: the two paths between the pcmpistri sets and the long ones (a pair of pcmpistrm, then truffle) */
+static const char *set_names[] = {"set_1", "set_4", "set_16", "set_32", "set_24", "set_40"};
 
 static int scenarios(int p, const char **out) {
     switch (p) {
     case P_MEMMOVE: out[0] = "disjoint"; out[1] = "ovl_dst+1"; out[2] = "ovl_dst-1"; out[3] = "ovl_dst+half"; out[4] = "ovl_dst-half"; return 5;
     case P_MEMSET: out[0] = "byte"; out[1] = "zero"; return 2;
     case P_MEMCMP: case P_STRCMP: out[0] = "equal"; out[1] = "diff_first"; out[2] = "diff_last"; return 3;
-    case P_STRSPN: case P_STRCSPN: for (int i = 0; i < 4; i++) out[i] = set_names[i]; return 4;
+    case P_STRSPN: case P_STRCSPN: for (int i = 0; i < 6; i++) out[i] = set_names[i]; return 6;
     case P_MEMCHR: out[0] = "absent"; out[1] = "last"; return 2;
     default: out[0] = "full"; return 1;
     }

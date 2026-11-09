@@ -94,6 +94,15 @@ def trip_count(fn, loop, preds, dom):
     return best, pre, latch
 
 
+def exit_weights(term, original, loop):
+    """A copied branch that leaves the loop one way: that way unlikely, as the
+    back edge made it while the loop was one (the layout keeps the copies in line)."""
+    if term.kind == 'br' and 'weights' not in term.attrs and original.targets[0] is not original.targets[1]:
+        outside = [x not in loop.blocks for x in original.targets]
+        if outside.count(True) == 1:
+            term.attrs['weights'] = (1, 16) if outside[0] else (16, 1)
+
+
 def unroll_loop(fn, loop, exit_at, pre, latch):
     order = [b for b in fn.rpo() if b in loop.blocks]
     header = loop.header
@@ -143,6 +152,7 @@ def unroll_loop(fn, loop, exit_at, pre, latch):
                         v = phi.incoming(b)
                         phi.add_incoming(bm[b], vm.get(v, v))
             new.targets = targets
+            exit_weights(new, t, loop)
             bm[b].set_term(new)
     pre.term.targets = [copies[0][0][header] if x is header else x for x in pre.term.targets]
     # the originals: no edges out, then the uses of their values after the loop repaired
@@ -354,6 +364,7 @@ def unroll_partial(fn, loop, pre, latch, count):
                             v = phi.incoming(b)
                             phi.add_incoming(bm[b], vm.get(v, v))
                 new.targets = targets
+                exit_weights(new, t, loop)
             bm[b].set_term(new)
     last_bm, last_vm = copies[-1]
     for phi, np in main_phis.items():
