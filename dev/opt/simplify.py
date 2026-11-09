@@ -376,6 +376,11 @@ class Simplifier:
             zb, _ = self.facts.bits(b)
             if za | zb == mask:
                 return self.fn.const(ty, 0)
+        if k == 'or' and ty.kind == 'i' and cb is None and ca is None:
+            za, _ = self.facts.bits(a)
+            zb, _ = self.facts.bits(b)
+            if za | zb == mask:
+                return self.new(op, 'add', [a, b], ty)       # no bit in both: a sum, which a lea can take
         if k in ('and', 'or') and ty is I1:
             return self.combine_tests(op, k, a, b)
         return None

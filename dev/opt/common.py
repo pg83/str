@@ -222,6 +222,58 @@ def merge_tails(fn, min_ops=2):
         changed = True
 
 
+# ---------------------------------------------------------- duplication
+
+def duplicate_tails(fn, max_ops=3):
+    """A small block that joins values (phis) and decides or returns on them
+    is copied into each predecessor that only jumps to it: the join and the
+    jump go, the phis resolve to what each way brought."""
+    changed = False
+    preds = fn.preds()
+    for b in list(fn.blocks):
+        if b is fn.entry or b not in fn.blocks or b.term.kind not in ('ret', 'br'):
+            continue
+        phis = b.phis()
+        ops = body(b)
+        if not phis or len(ops) > max_ops or any(op.effects or op.kind in ('load', 'alloca', 'call') for op in ops) or b in b.term.targets:
+            continue
+        defined = [phi.result for phi in phis] + [op.result for op in ops if op.result is not None]
+        if any(u.block is not b and not (u.kind == 'phi' and u.block in b.term.targets) for v in defined for u in v.uses):
+            continue
+        jumpers = [p for p in preds[b] if p.term.kind == 'jmp' and p is not b]
+        if not jumpers or len(preds[b]) < 2:
+            continue
+        for p in jumpers:
+            mapping = {phi.result: phi.incoming(p) for phi in phis}
+            for op in ops:
+                new = fn.new(op.kind, [mapping.get(a, a) for a in op.args], tys=[r.ty for r in op.results], attrs=dict(op.attrs))
+                p.append(new)
+                for r, nr in zip(op.results, new.results):
+                    mapping[r] = nr
+            t = fn.new(b.term.kind, [mapping.get(a, a) for a in b.term.args], attrs=dict(b.term.attrs))
+            t.targets = list(b.term.targets)
+            for phi in phis:
+                phi.remove_incoming(p)
+            p.set_term(t)
+            for s in b.term.targets:
+                for phi in s.phis():
+                    v = phi.incoming(b)
+                    phi.add_incoming(p, mapping.get(v, v))
+        preds = fn.preds()
+        if not preds[b]:
+            for s in b.term.targets:
+                for phi in s.phis():
+                    if b in phi.preds:
+                        phi.remove_incoming(b)
+            for op in reversed(b.ops):
+                op.detach()
+            b.term.detach()
+            fn.blocks.remove(b)
+            preds = fn.preds()
+        changed = True
+    return changed
+
+
 # ------------------------------------------------------------- conditions
 
 def probability(term, index):

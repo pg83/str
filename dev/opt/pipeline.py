@@ -7,7 +7,7 @@ motion and sinking."""
 import os
 
 from .cfgsimp import simplify_cfg, split_returns
-from .common import merge_tails
+from .common import duplicate_tails, merge_tails
 from .cse import cse
 from .cvp import cvp
 from .ifconv import ifconv
@@ -70,6 +70,11 @@ def late(fn):
     if merge_tails(fn):
         check(fn, 'merge_tails')
         dead_code(fn)
+        simplify_cfg(fn)
+        check(fn, 'simplify_cfg')
+    if duplicate_tails(fn):
+        check(fn, 'duplicate_tails')
+        simplify(fn)
         simplify_cfg(fn)
         check(fn, 'simplify_cfg')
 

@@ -199,6 +199,12 @@ def assemble(mf, phase=0, jcc_align=False, loop_align=16):
                 else:
                     j, _, _ = structured(i, mf.isa)
                     j['ops'] = j['ops'][:1]
+                    w = getattr(b, 'weights', None)
+                    if (w and w[1] > w[0]) or (not w and position[no] <= n < position[yes]):
+                        # the likelier way (a back edge, say) takes the one jump
+                        yes, no = no, yes
+                        j['cc'] = INVERT[i.cc]
+                        j['mnemonic'] = 'j' + j['cc']
                     items.append(('ins', Item(j, yes, None, 'jcc', i)))
                     jj = {'mnemonic': 'jmp', 'cc': None, 'ops': [{'kind': 'NearBranch', 'branch': 0, 'size': 32, 'field_pos': None}],
                           'form': None, 'offset': 0, 'op_mask': 'none', 'zeroing': False, 'bcast': False, 'rep': None, 'lock': False, 'notrack': False}

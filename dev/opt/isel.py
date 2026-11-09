@@ -85,6 +85,7 @@ class ISel:
         self.const_here = {}     # (constant, block) -> the register it was put in there
         self.zext_ok = set()     # VRegs whose narrow (8/16-bit) value is zero-extended in them (movzx, kmov)
         self.pending_late = set()   # ops of the block held back to its end (they feed phis alone)
+        self.cmp_ins, self.cmp_cc = {}, {}   # a compare kept as a value: the instruction that set the flags, its condition
         self.block_of = {}
         self.skip = set()        # ops folded into their users
         self.addr_only = set()   # ops that only feed memory operands
@@ -195,6 +196,19 @@ class ISel:
         r = self.const_here.get((v, self.block))
         if r is not None:
             return r
+        pre = self.loop_entry(self.fn_block)
+        if pre is not None:
+            # inside a loop: the register is set once, before the loop
+            r = self.const_here.get((v, pre))
+            if r is None:
+                r = self.const_here[(v, pre)] = self.new('gpr')
+                ins = Ins('mov', [Reg(r, 32), Imm(c & 0xffffffff, 32)], 'w r') if c < (1 << 32) else \
+                    Ins('mov', [Reg(r, 64), Imm(ir.signed(c, 64), 32)], 'w r') if -(1 << 31) <= ir.signed(c, 64) < 0 else \
+                    Ins('movabs', [Reg(r, 64), Imm(ir.signed(c, 64), 64)], 'w r')
+                if c < (1 << 32):
+                    self.clean32.add(r)
+                self.insert_before_end(pre, ins)
+            return r
         r = self.new('gpr')
         if c == 0:
             self.emit('xor', Reg(r, 32), Reg(r, 32), acc='w r', kind='zero')
@@ -203,6 +217,25 @@ class ISel:
             self.materialize_into(r, v)
         self.const_here[(v, self.block)] = r
         return r
+
+    def loop_entry(self, b):
+        """The block before the outermost loop around b (its header's dominator), or None when b is in no loop."""
+        loop = self.loops.of.get(b)
+        pre = None
+        while loop is not None:
+            parent = self.dom.parent(loop.header)
+            if parent is None:
+                break
+            pre, loop = parent, self.loops.of.get(parent)
+        return pre
+
+    def insert_before_end(self, b, ins):
+        """ins into the (already selected) block b, before its phi copies, compare and jump."""
+        mb = self.block_of[b]
+        at = len(mb.ins)
+        while at > 0 and (mb.ins[at - 1].kind in ('jmp', 'jcc', 'cmp', 'copy', 'copy32', 'kmov', 'tail') or mb.ins[at - 1].op in ('set',)):
+            at -= 1
+        mb.ins.insert(at, ins)
 
     def constant_operand(self, data):
         label = self.constants.get(data)
@@ -259,6 +292,25 @@ class ISel:
                     continue
                 if self.can_fold_load(op, user):
                     self.skip.add(op)
+        # store(p, op(load(p), x)): the operation on the memory itself
+        self.rmw = {}
+        for b in fn.blocks:
+            for i, op in enumerate(b.ops):
+                if op.kind != 'store':
+                    continue
+                v = op.args[1]
+                o = v.op
+                if o.kind not in ('or', 'and', 'xor', 'add', 'sub') or o.block is not b or len(v.uses) != 1 or v.ty.kind != 'i' or v.ty.bits < 8:
+                    continue
+                which = next((n for n, a in enumerate(o.args) if a.op.kind == 'load' and a.op in self.skip and a.op.args[0] is op.args[0]
+                              and len(a.uses) == 1 and not a.op.attrs.get('volatile')), None)
+                if which is None or (o.kind == 'sub' and which != 0):
+                    continue
+                oi = self.uses_at[o][1]
+                if any(x.writes_memory or x.kind in ('call', 'asm') for x in b.ops[oi + 1:i]):
+                    continue
+                self.rmw[op] = (o, o.args[1 - which])
+                self.skip.add(o)
         # a masked load feeding one masked compare under the same mask: the compare's memory operand
         for b in fn.blocks:
             for i, op in enumerate(b.ops):
@@ -334,8 +386,12 @@ class ISel:
                     args.reverse()
                 return args[1] is v and args[0] is not v
             if name in MASK_CMP:
+                if args[0] is v and args[1] is not v:
+                    args.reverse()
                 return args[1] is v and args[0] is not v
             if name.endswith('_masked'):
+                if args[1] is v and args[2] is not v:
+                    args[1], args[2] = args[2], args[1]
                 return args[2] is v and args[1] is not v
             if name == 'ternary32':
                 return args[2] is v and args[0] is not v and args[1] is not v
@@ -538,7 +594,7 @@ class ISel:
         uses (const_reg finds the one in force)."""
         fn = self.fn
         dom = self.dom = ir.Dominators(fn)
-        loops = ir.find_loops(fn, dom)
+        loops = self.loops = ir.find_loops(fn, dom)
         self.const_at = {}
         self.const_targets = {}
         for v in list(fn.consts.values()):
@@ -711,6 +767,14 @@ class ISel:
             return INVERT_CC[cc] if want == 1 else cc
         if op.kind == 'icmp' and op in self.skip:
             return self.compare(op)
+        if op.kind == 'icmp' and op.block is self.fn_block and op in self.cmp_ins:
+            ins = self.cmp_ins[op]
+            for later in reversed(self.block.ins):
+                if later is ins:
+                    return self.cmp_cc[op]        # the flags are still the compare's
+                if later.op in FLAG_WRITERS or FLAGS in later.imp_def or later.kind in ('call', 'cmp'):
+                    break
+            return self.compare(op)               # cheaper than testing the byte
         if op.kind == 'vop' and op in self.skip:
             return self.string_flags(op)
         r = self.reg(v, 8)
@@ -856,6 +920,12 @@ class ISel:
         addr, v = op.args
         ty = v.ty
         mem = self.mem_operand(addr, ty.size)
+        if op in self.rmw:
+            o, x = self.rmw[op]
+            bits = ty.bits
+            other = self.imm(x) if self.imm_ok(x) and bits <= 32 or x.const is not None and bits == 64 and self.imm_ok(x) else self.reg(x, bits)
+            self.emit(ARITH[o.kind], mem, other, acc='rw r')
+            return
         if ty.is_vec:
             aligned = op.attrs.get('align', 1) >= ty.size
             self.emit(self.vmov_load(ty.bits, aligned), mem, self.reg(v), acc='w r')
@@ -959,6 +1029,12 @@ class ISel:
             self.emit('mov', dst, self.reg(a, bits), acc='w r', kind='copy')
             self.emit('not', dst, acc='rw')
             return
+        if k in ('xor', 'and') and self.bmi and bits >= 32 and b.op.kind == 'add' and b.op.args[1].const == op.ty.mask and b.op.args[0] is a \
+                and len(b.uses) == 1:
+            self.emit('blsmsk' if k == 'xor' else 'blsr', dst, self.reg(a, bits), acc='w r')     # the bits up to the lowest set one; that one cleared
+            if bits == 32:
+                self.clean32.add(dst.r)
+            return
         if k in ('or', 'xor') and bits == 64 and b.const is not None and is_pow2(b.const) and not self.imm_ok(b):
             # a bit beyond an imm32: bts/btc with the bit's index
             self.emit('mov', dst, self.reg(a, bits), acc='w r', kind='copy')
@@ -986,6 +1062,11 @@ class ISel:
             # lea dst, [a + c]: no copy and no flags
             self.emit('lea', dst, Mem(bits // 8, base=self.vreg(a), disp=ir.signed(b.const, bits)), acc='w r', kind='lea')
             return
+        if k == 'add' and bits >= 32 and not tested:
+            for x, y in ((a, b), (b, a)):
+                if y.op.kind == 'shl' and y.op.args[1].const in (1, 2, 3) and len(y.uses) == 1 and y.op.block is op.block and x.const is None:
+                    self.emit('lea', dst, Mem(bits // 8, base=self.vreg(x), index=self.vreg(y.op.args[0]), scale=1 << y.op.args[1].const), acc='w r', kind='lea')
+                    return
         if k in ('add', 'and', 'or', 'xor') and b.const is None and not (b.op in self.skip and b.op.kind == 'load') \
                 and self.dies_at(b, op) and not self.dies_at(a, op):
             a, b = b, a      # the operand that dies here is overwritten: no copy for the other
@@ -1024,6 +1105,13 @@ class ISel:
             v = v.op.args[0]
         if v.op.kind == 'and' and v.op.args[1].const is not None and v.op.args[1].const & keep == keep:
             v = v.op.args[0]
+        if v.op.kind == 'shl' and v.op.args[1].const in (1, 2, 3) and v.op.args[0].op.kind == 'and' and v.op.args[0].op.args[1].const is not None \
+                and len(v.uses) == 1 and len(v.op.args[0].uses) == 1:
+            k, m = v.op.args[1].const, v.op.args[0].op.args[1].const
+            if (m << k) & keep == keep & ~((1 << k) - 1):
+                t = self.new('gpr')
+                self.emit('lea', Reg(t, bits), Mem(bits // 8, index=self.vreg(v.op.args[0].op.args[0]), scale=1 << k), acc='w r', kind='lea')
+                return Reg(t, bits)
         return self.reg(v, bits)
 
     def shift(self, op, legacy, bmi):
@@ -1102,6 +1190,7 @@ class ISel:
     def sel_icmp(self, op):
         # not folded: a byte value from the flags
         cc = self.compare(op)
+        self.cmp_ins[op], self.cmp_cc[op] = self.block.ins[-1], cc
         dst = self.define(op.result)
         self.emit('set', Reg(dst.r, 8), cc=cc, acc='w', kind='setcc')
         self.mf.setcc_defs = getattr(self.mf, 'setcc_defs', set()) | {dst.r}
