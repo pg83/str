@@ -56,6 +56,30 @@ def is_pow2(c):
     return c > 0 and c & (c - 1) == 0
 
 
+def cold_blocks(fn):
+    """The blocks every way into which is the unlikely side of a weighted branch (or comes from such a block)."""
+    preds = fn.preds()
+    cold = set()
+    changed = True
+    while changed:
+        changed = False
+        for b in fn.blocks:
+            if b is fn.entry or b in cold or not preds[b]:
+                continue
+            ways = []
+            for p in preds[b]:
+                t = p.term
+                unlikely = False
+                if t.kind == 'br' and 'weights' in t.attrs and t.targets[0] is not t.targets[1]:
+                    w, i = t.attrs['weights'], t.targets.index(b)
+                    unlikely = w[i] * 10 < w[1 - i]
+                ways.append(p in cold or unlikely)
+            if all(ways):
+                cold.add(b)
+                changed = True
+    return cold
+
+
 def permute_ternary(imm, perm):
     """The imm8 of vpternlog with its operands reordered: new operand i is old operand perm[i]."""
     out = 0
@@ -196,7 +220,7 @@ class ISel:
         r = self.const_here.get((v, self.block))
         if r is not None:
             return r
-        pre = self.loop_entry(self.fn_block)
+        pre = self.loop_entry(self.fn_block) if self.fn_block not in self.cold else None
         if pre is not None:
             # inside a loop: the register is set once, before the loop
             r = self.const_here.get((v, pre))
@@ -398,6 +422,8 @@ class ISel:
             if name in ('insert128', 'testz'):
                 return args[1] is v and args[0] is not v
             return False
+        if user.kind == 'vop' and user.attrs['name'] == 'splat8' and self.vex:
+            return user.args[0] is v
         if ty.bits < 32 and user.kind not in ('zext', 'sext'):
             return False
         if user.kind in ('add', 'and', 'or', 'xor', 'mul'):
@@ -595,6 +621,7 @@ class ISel:
         fn = self.fn
         dom = self.dom = ir.Dominators(fn)
         loops = self.loops = ir.find_loops(fn, dom)
+        self.cold = cold_blocks(fn)
         self.const_at = {}
         self.const_targets = {}
         for v in list(fn.consts.values()):
@@ -606,10 +633,10 @@ class ISel:
                 for ub in blocks:
                     if ub not in dom.pre:
                         continue
-                    if not idiom and loops.depth(ub) == 0 and self.foldable_constant_use(v, u):
+                    if not idiom and (loops.depth(ub) == 0 or ub in self.cold) and self.foldable_constant_use(v, u):
                         continue
                     t = ub
-                    while True:
+                    while ub not in self.cold:
                         loop = loops.of.get(t)
                         if loop is None or dom.parent(loop.header) is None:
                             break
@@ -785,6 +812,10 @@ class ISel:
         a, b = op.args
         pred = op.attrs['pred']
         bits = max(a.ty.bits, 8)
+        if a in self.kview and pred in ('eq', 'ne') and b.const == 0 and a in self.vregs:
+            r = Reg(self.vregs[a], 64 if a.ty.bits > 32 else 32)
+            self.emit('test', r, r, acc='r r', kind='cmp')
+            return 'e' if pred == 'eq' else 'ne'
         if a in self.kview and pred in ('eq', 'ne') and b.const in (0, a.ty.mask):
             # kortest: ZF for an all-zero mask, CF for an all-one one
             k = Reg(self.kview[a], a.ty.bits)
@@ -1052,21 +1083,21 @@ class ISel:
             self.emit('and', dst, Imm(b.const, 32), acc='rw r')
             self.clean32.add(dst.r)
             return
-        # add with two registers: lea keeps both operands
-        if k == 'add' and b.const is None and bits >= 32 and not (b.op in self.skip and b.op.kind == 'load'):
-            self.emit('lea', dst, Mem(bits // 8, base=self.vreg(a), index=self.vreg(b)), acc='w r', kind='lea')
-            return
         tested = any(u.kind == 'icmp' and u.args[0] is op.result and u.args[1].const == 0 and u.attrs['pred'] in ('eq', 'ne')
                      and self.uses_at[u][0] is op.block for u in op.result.uses)
-        if k == 'add' and self.imm_ok(b) and bits >= 32 and b.const != 0 and b.op.kind == 'const' and not tested:
-            # lea dst, [a + c]: no copy and no flags
-            self.emit('lea', dst, Mem(bits // 8, base=self.vreg(a), disp=ir.signed(b.const, bits)), acc='w r', kind='lea')
-            return
         if k == 'add' and bits >= 32 and not tested:
             for x, y in ((a, b), (b, a)):
                 if y.op.kind == 'shl' and y.op.args[1].const in (1, 2, 3) and len(y.uses) == 1 and y.op.block is op.block and x.const is None:
                     self.emit('lea', dst, Mem(bits // 8, base=self.vreg(x), index=self.vreg(y.op.args[0]), scale=1 << y.op.args[1].const), acc='w r', kind='lea')
                     return
+        # add with two registers: lea keeps both operands
+        if k == 'add' and b.const is None and bits >= 32 and not (b.op in self.skip and b.op.kind == 'load'):
+            self.emit('lea', dst, Mem(bits // 8, base=self.vreg(a), index=self.vreg(b)), acc='w r', kind='lea')
+            return
+        if k == 'add' and self.imm_ok(b) and bits >= 32 and b.const != 0 and b.op.kind == 'const' and not tested:
+            # lea dst, [a + c]: no copy and no flags
+            self.emit('lea', dst, Mem(bits // 8, base=self.vreg(a), disp=ir.signed(b.const, bits)), acc='w r', kind='lea')
+            return
         if k in ('add', 'and', 'or', 'xor') and b.const is None and not (b.op in self.skip and b.op.kind == 'load') \
                 and self.dies_at(b, op) and not self.dies_at(a, op):
             a, b = b, a      # the operand that dies here is overwritten: no copy for the other
@@ -1551,6 +1582,9 @@ class ISel:
         if name == 'broadcast128':
             x = args[0]
             dst = self.define(op.result)
+            if x.const is not None and self.const_reg(x) is None:
+                self.emit('vbroadcasti128', Reg(dst.r, 256), self.constant_operand(x.const), acc='w r')
+                return
             src = self.vreg(x)
             self.emit('vinserti128', Reg(dst.r, 256), Reg(src, 256), Reg(src, 128), Imm(1, 8), acc='w r r r')
             return
@@ -1600,6 +1634,9 @@ class ISel:
         bits = op.ty.bits
         if x.const is not None:
             self.vregs[op.result] = self.materialize(self.fn.const(op.ty, bytes([x.const & 0xff]) * op.ty.size))
+            return
+        if self.vex and x.op in self.skip and x.op.kind == 'load' and x not in self.vregs:
+            self.emit('vpbroadcastb', Reg(dst.r, bits), self.mem_operand(x.op.args[0], 1), acc='w r')
             return
         if self.evex:
             self.emit('vpbroadcastb', Reg(dst.r, bits), self.reg(x, 32), acc='w r')

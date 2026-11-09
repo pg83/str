@@ -200,7 +200,8 @@ def assemble(mf, phase=0, jcc_align=False, loop_align=16):
                     j, _, _ = structured(i, mf.isa)
                     j['ops'] = j['ops'][:1]
                     w = getattr(b, 'weights', None)
-                    if (w and w[1] > w[0]) or (not w and position[no] <= n < position[yes]):
+                    stays = lambda s: bool(b.loops) and b.loops <= s.loops
+                    if (w and w[1] > w[0]) or (not w and (stays(no) and not stays(yes) or not stays(yes) and position[no] <= n < position[yes])):
                         # the likelier way (a back edge, say) takes the one jump
                         yes, no = no, yes
                         j['cc'] = INVERT[i.cc]
