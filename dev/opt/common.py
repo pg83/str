@@ -1,0 +1,285 @@
+"""Code the paths share. The identical leading ops of a branch's two arms
+are hoisted above the branch; the identical trailing ops of blocks that end
+alike (the same return, a jump to the same block) are merged into one block
+the paths jump to, with phis for the inputs that differ; and a cheap
+condition that only picks between a block's other way and its own successor
+is folded into that block's branch (c1 && c2 decided by one branch: the bit
+tests of one word then combine, simplify.py, and what remains is split
+back into jumps by the selection)."""
+from .ir import I1, PURE, DIVISIONS
+from .ifconv import speculable
+
+
+# ------------------------------------------------------------------ hoist
+
+def same_op(a, b):
+    return (a.kind == b.kind and a.kind not in ('phi', 'alloca') and a.attrs == b.attrs
+            and len(a.results) == len(b.results) and all(x.ty is y.ty for x, y in zip(a.results, b.results))
+            and len(a.args) == len(b.args) and all(x is y for x, y in zip(a.args, b.args)))
+
+
+def hoist_common(fn):
+    """The leading ops both arms of a branch compute alike run before the branch."""
+    changed = False
+    preds = fn.preds()
+    for b in fn.blocks:
+        t = b.term
+        if t.kind != 'br':
+            continue
+        s1, s2 = t.targets
+        if s1 is s2 or preds[s1] != [b] or preds[s2] != [b]:
+            continue
+        while s1.ops and s2.ops and same_op(s1.ops[0], s2.ops[0]):
+            o1, o2 = s1.ops[0], s2.ops[0]
+            s1.remove(o1)
+            b.append(o1)
+            for r, s in zip(o1.results, o2.results):
+                fn.replace_all_uses(s, r)
+            o2.detach()
+            s2.remove(o2)
+            changed = True
+    return changed
+
+
+# ------------------------------------------------------------------ tails
+
+def body(block):
+    return [op for op in block.ops if op.kind != 'phi']
+
+
+def common_tail(a, b, ends):
+    """How many trailing ops of a and b are the same computation (n), and the
+    pairs of inputs (x from a, y from b) that differ, given ends, the pairs
+    the two blocks' ends use."""
+    inputs = {}
+
+    def match(x, y):
+        if x is y:
+            return x.op.block is not a and x.op.block is not b
+        if x.ty is not y.ty or x.const is not None or y.const is not None or x.op.kind in ('sym', 'undef') or y.op.kind in ('sym', 'undef'):
+            return False
+        if recomputable(x, y, a, b, match):
+            inputs[(x, y)] = 'recompute'      # the same expression on both sides: computed once, in the tail
+            return True
+        if address_only(x) or address_only(y):
+            return False      # a phi would cost the address its folding
+        inputs[(x, y)] = 'phi'
+        return True
+
+    if not all(match(x, y) for x, y in ends):
+        return 0, {}
+    ops_a, ops_b = body(a), body(b)
+    n = 0
+    while n < len(ops_a) and n < len(ops_b):
+        oa, ob = ops_a[-1 - n], ops_b[-1 - n]
+        if not (oa.kind == ob.kind and oa.kind != 'alloca' and oa.attrs == ob.attrs and len(oa.results) == len(ob.results)
+                and all(r.ty is s.ty for r, s in zip(oa.results, ob.results)) and len(oa.args) == len(ob.args)):
+            break
+        # a result used by the later ops: the same position on both sides, or no match
+        if any((x is r) != (y is s) for r, s in zip(oa.results, ob.results) for x, y in inputs):
+            break
+        trial = dict(inputs)
+        if not all(match(x, y) for x, y in zip(oa.args, ob.args)):
+            inputs = trial
+            break
+        for r, s in zip(oa.results, ob.results):
+            inputs.pop((r, s), None)
+        n += 1
+    return n, inputs
+
+
+def address_only(v):
+    """A pointer sum that only feeds memory operands (folded into them, a lea as a phi)."""
+    return v.op.kind in ('ptradd', 'i2p') and all(
+        u.kind in ('load', 'store') and u.args[0] is v or u.kind == 'ptradd' or u.kind == 'vop' and u.attrs.get('memory') for u in v.uses)
+
+
+def recomputable(x, y, a, b, match):
+    """x (of block a) and y (of b) are the same pure expression, each used once,
+    of operands that match in turn (the same value, or inputs of the tail)."""
+    ox, oy = x.op, y.op
+    return (ox.kind == oy.kind and ox.kind in PURE and ox.kind not in DIVISIONS and ox.kind != 'phi' and ox.attrs == oy.attrs
+            and ox.block is a and oy.block is b and len(x.uses) == 1 and len(y.uses) == 1 and len(ox.results) == 1
+            and len(ox.args) == len(oy.args) and all(match(p, q) for p, q in zip(ox.args, oy.args)))
+
+
+def ends_of(block):
+    """The values the block's end passes on, paired by position: the return's, or its successor's phi entries."""
+    t = block.term
+    if t.kind == 'ret':
+        return list(t.args)
+    return [phi.incoming(block) for phi in t.targets[0].phis()]
+
+
+def merge_tail(fn, a, b, n, inputs):
+    m = fn.block(a.name + '.tail')
+    phis = {}
+    for (x, y), how in inputs.items():
+        if how == 'phi':
+            phi = fn.phi(x.ty)
+            m.append(phi)
+            phi.add_incoming(a, x)
+            phi.add_incoming(b, y)
+            phis[(x, y)] = phi.result
+    mapping = {}
+
+    def value(x, y):
+        if x is y:
+            return x
+        v = phis.get((x, y))
+        if v is None and inputs.get((x, y)) == 'recompute':
+            args = [value(p, q) for p, q in zip(x.op.args, y.op.args)]
+            v = phis[(x, y)] = m.append(fn.new(x.op.kind, args, x.ty, dict(x.op.attrs))).result
+        return v if v is not None else mapping[x]
+
+    ops_a, ops_b = body(a)[len(body(a)) - n:], body(b)[len(body(b)) - n:]
+    for oa, ob in zip(ops_a, ops_b):
+        new = fn.new(oa.kind, [value(x, y) for x, y in zip(oa.args, ob.args)], tys=[r.ty for r in oa.results], attrs=dict(oa.attrs))
+        m.append(new)
+        for r, s, nr in zip(oa.results, ob.results, new.results):
+            mapping[r] = nr
+    t = a.term
+    if t.kind == 'ret':
+        m.set_term(fn.new('ret', [value(x, y) for x, y in zip(a.term.args, b.term.args)]))
+    else:
+        target = t.targets[0]
+        for phi in target.phis():
+            v = value(phi.incoming(a), phi.incoming(b))
+            phi.remove_incoming(a)
+            phi.remove_incoming(b)
+            phi.add_incoming(m, v)
+        jmp = fn.new('jmp')
+        jmp.targets = [target]
+        m.set_term(jmp)
+    for block, ops in ((a, ops_a), (b, ops_b)):
+        for op in reversed(ops):
+            op.detach()
+            block.remove(op)
+        jmp = fn.new('jmp')
+        jmp.targets = [m]
+        block.set_term(jmp)
+
+
+def canonical_order(block):
+    """The block's ops in a dependence order (operands first, in argument
+    order, from its end): the same computation then reads the same whatever
+    order it was written in.  Only where nothing writes memory."""
+    ops = body(block)
+    if any(op.effects or op.kind == 'alloca' for op in ops):
+        return
+    here = set(ops)
+    order, seen = [], set()
+
+    def visit(op):
+        if op in seen:
+            return
+        seen.add(op)
+        for a in op.args:
+            if a.op in here:
+                visit(a.op)
+        order.append(op)
+
+    for a in block.term.args:
+        if a.op in here:
+            visit(a.op)
+    if block.term.kind == 'jmp':
+        for phi in block.term.targets[0].phis():
+            a = phi.incoming(block)
+            if a.op in here:
+                visit(a.op)
+    for op in ops:
+        visit(op)
+    block.ops = [op for op in block.ops if op.kind == 'phi'] + order
+
+
+def merge_tails(fn, min_ops=2):
+    """Blocks that end alike and compute the same last ops share one copy of them."""
+    changed = False
+    while True:
+        groups = {}
+        for b in fn.blocks:
+            t = b.term
+            if t.kind == 'ret':
+                groups.setdefault('ret', []).append(b)
+            elif t.kind == 'jmp' and t.targets[0] is not b and body(b):
+                groups.setdefault(t.targets[0], []).append(b)
+        for blocks in groups.values():
+            if len(blocks) > 1:
+                for b in blocks:
+                    canonical_order(b)
+        best = None
+        for blocks in groups.values():
+            for i, a in enumerate(blocks):
+                ends_a = ends_of(a)
+                for b in blocks[i + 1:]:
+                    n, inputs = common_tail(a, b, list(zip(ends_a, ends_of(b))))
+                    if n >= min_ops and n >= sum(1 for how in inputs.values() if how == 'phi') and (best is None or n > best[0]):
+                        best = (n, inputs, a, b)
+        if best is None:
+            return changed
+        n, inputs, a, b = best
+        merge_tail(fn, a, b, n, inputs)
+        changed = True
+
+
+# ------------------------------------------------------------- conditions
+
+def probability(term, index):
+    w = term.attrs.get('weights')
+    return None if not w else w[index] / (w[0] + w[1])
+
+
+def fold_conditions(fn, budget=2):
+    """b: br c1 -> s, other; s (reached from b alone): a few pure ops, br c2 ->
+    cont, other.  The two branches become one in b on c1 && c2 (with the
+    negations the directions ask for); s's ops run in b."""
+    changed = False
+    preds = fn.preds()
+    for b in list(fn.blocks):
+        if b not in fn.blocks or b.term.kind != 'br':
+            continue
+        for side in (0, 1):
+            s, other = b.term.targets[side], b.term.targets[1 - side]
+            if s is other or s is b or preds[s] != [b] or s.term.kind != 'br' or s.phis():
+                continue
+            if other not in s.term.targets or s.term.targets[0] is s.term.targets[1]:
+                continue
+            if len(s.ops) > budget + 1 or not all(speculable(op) for op in s.ops):
+                continue
+            if any(phi.incoming(b) is not phi.incoming(s) for phi in other.phis()):
+                continue
+            s_side = s.term.targets.index(other)
+            cont = s.term.targets[1 - s_side]
+            if cont is b:
+                continue
+            c1, c2 = b.term.args[0], s.term.args[0]
+            for op in list(s.ops):
+                s.remove(op)
+                b.append(op)
+            one = fn.const(I1, 1)
+            if side == 1:
+                c1 = b.append(fn.new('xor', [c1, one], I1)).result
+            if s_side == 0:
+                c2 = b.append(fn.new('xor', [c2, one], I1)).result
+            cond = b.append(fn.new('and', [c1, c2], I1)).result
+            br = fn.new('br', [cond])
+            br.targets = [cont, other]
+            p1, p2 = probability(b.term, side), probability(s.term, 1 - s_side)
+            if p1 is not None or p2 is not None:
+                p = (p1 if p1 is not None else 1) * (p2 if p2 is not None else 1)
+                br.attrs['weights'] = (int(p * 2000) + 1, int((1 - p) * 2000) + 1)
+            if b.term.attrs.get('unpredictable') or s.term.attrs.get('unpredictable'):
+                br.attrs['unpredictable'] = True
+            b.set_term(br)
+            for phi in cont.phis():
+                phi.preds = [b if p is s else p for p in phi.preds]
+            for phi in other.phis():
+                if s in phi.preds:
+                    phi.remove_incoming(s)
+            s.term.detach()
+            s.term = None
+            fn.blocks.remove(s)
+            preds = fn.preds()
+            changed = True
+            break
+    return changed

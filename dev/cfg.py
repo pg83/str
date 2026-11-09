@@ -19,7 +19,7 @@ Requires one function per section (-ffunction-sections).
 import copy
 
 from objfile import Ins, Reloc
-from opt import refresh
+from postopt import refresh
 
 # struct str_config { const char *name; unsigned needs; struct str_table table; }
 SLOTS = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr',

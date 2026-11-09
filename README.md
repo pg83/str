@@ -42,22 +42,26 @@ only the Skylake-SP configuration names the `_jcc` twins.
   from `cpuid`; a constructor copies the host's configuration into
   `str_table`, and the public `str_memcpy` and friends jump through it. A
   libc build renames them: `-Dstr_memcpy=memcpy ...`.
-- `dev/cc/`, `dev/strcc.py` — the library compiler, Python only: a C
-  preprocessor and parser, typed CFG/SSA, optimization recipes for the
-  concrete kernels, instruction selection and register allocation. SIMD
-  operations are builtins; system intrinsic headers are not parsed. The
-  compiler builds instruction and object models directly, without invoking
-  a C compiler, assembler or linker, parsing an input object or decoding
-  machine code.
-- `dev/` — shared machine optimization and emission: `x86.py` decodes x86-64 (legacy,
-  VEX, EVEX) into structured instructions, `opt.py` rewrites them (tail and
-  branch layout, mask-register and vector-register rewrites, calls through
-  the table slots instead of the entry points), `encode.py` encodes them
-  again from the same tables, `layout.py` lays the sections out (branch
-  relaxation, alignment, relocations), `elf.py` and `elfout.py` read and
-  write the objects and the archive, `post.py` drives it. No assembler, no
-  `ar`. The native compiler uses the optimizer, encoder, layout and object
-  writer directly; `post.py` retains the external-compiler comparison path.
+- `dev/opt/`, `dev/strcc.py` — the library's compiler, Python only: a C
+  preprocessor and parser for the dialect the sources use (SIMD operations
+  are builtins; no system headers), lowering to an SSA IR, a pipeline of
+  general passes (mem2reg, simplification with known bits and ranges,
+  CFG simplification with jump threading, inlining, full unrolling,
+  if-conversion, loop-invariant motion, common code hoisted and merged,
+  conditions chained), instruction selection to virtual registers (compares
+  and addresses folded, mask registers for AVX-512), register allocation by
+  graph coloring with coalescing, the frame, block layout, encoding
+  (`dev/encode.py`) with branch relaxation and the measured entry phases
+  (`dev/phases.json`), and the objects and archive written directly. Every
+  configuration of `dispatch.c` gets its own copies of the functions it
+  reaches, calling each other directly; `.build/post/report.txt` lists them.
+- `dev/` — the machine-code layer the compiler and the reference build
+  share: `x86.py` decodes x86-64 (legacy, VEX, EVEX) into structured
+  instructions, `encode.py` encodes them from the same tables, `elf.py` and
+  `elfout.py` read and write objects and the archive. The reference build
+  (`./build reference_libstr`: clang's objects through `post.py`, with
+  `postopt.py`'s rewrites, `cfg.py`, `layout.py`) stays for comparisons with
+  the compiler's code; the library itself does not use it.
 - `tst/test.c` — the library against the host C library: all sizes and
   alignments, overlaps, guard pages, every pair of page offsets of two
   pointers and every offset of one, random sets, for every configuration the
@@ -83,17 +87,18 @@ gcc for the test driver and external-compiler checks. For example,
 `CC=/no/compiler ./build -B .build-python libstr` builds the library without
 an external C compiler.
 
-`./build check_native_objects` explicitly builds the old compiler/post-pass
-pipeline in `.build/reference/` and compares all eleven objects byte for
-byte with the native build. Exact comparison requires the reference
-compiler version and flags. The compiler tests also verify that native
-compilation succeeds with external tools and object decoding disabled.
+`./build reference_libstr` builds the external-compiler reference
+(`.build/reference/libstr.a`, clang and the post pass) for comparisons with
+the compiler's code, function by function (`llvm-objdump` on the objects
+under `.build/post/` and `.build/reference/post/`); the two are not meant to
+match byte for byte. `dev/strcc.py FILE.c --dump ir|mir|asm [--function F]`
+shows one unit's code at the three stages.
 
-## Post pass
+## Post pass (the reference build)
 
-`dev/opt.py` rewrites selected machine instructions using a control-flow
-graph and register liveness per function. The native compiler and the
-external-compiler comparison build share these passes:
+`dev/postopt.py` rewrites selected machine instructions of clang's objects
+using a control-flow graph and register liveness per function; the library's
+own compiler does these things in its passes instead. The rewrites:
 
 - `rename` — def-use webs of vector registers that touch a `ymm` are moved
   to `ymm16-31` and `vzeroupper` is dropped: nothing dirties the upper halves

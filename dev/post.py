@@ -34,7 +34,7 @@ import cfg  # noqa: E402
 import elf  # noqa: E402
 import elfout  # noqa: E402
 import layout  # noqa: E402
-import opt  # noqa: E402
+import postopt as opt  # noqa: E402
 from objfile import Object  # noqa: E402
 from units import UNITS, unit_of  # noqa: E402
 

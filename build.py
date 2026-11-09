@@ -15,7 +15,8 @@ build.cflags += ["-O3", "-fno-builtin", "-fno-stack-protector", "-fomit-frame-po
 
 warning_flags = ["-Wall", "-Wextra", "-Werror"]
 
-# Optional external-compiler reference, used only by check_native_objects.
+# The external-compiler reference (clang and the post pass): built on request
+# only, for comparisons with the library's own compiler.
 reference_levels = [
     library(
         name="str_" + unit,
@@ -25,7 +26,6 @@ reference_levels = [
     for unit, march in UNITS.items()
 ]
 
-# Keep the old build available for explicit differential checks.
 reference_libstr = command(
     name="reference_libstr",
     inputs=build.glob("$(S)/dev/*.py"),
@@ -37,31 +37,19 @@ reference_libstr = command(
     color="cyan",
 )
 
-# C source -> typed CFG/SSA -> machine operations -> objects and archive.
-# No external compiler, assembler, object reader or decoder is on this path.
+# The library: C -> IR -> passes -> machine code -> objects and archive, by
+# dev/opt alone (Python); no external compiler, assembler or linker.
 libstr = command(
     name="libstr",
-    inputs=[*build.glob("$(S)/*.c"), *build.glob("$(S)/*.h"), *build.glob("$(S)/dev/*.py"),
-            *build.glob("$(S)/dev/cc/*.py"), "$(S)/dev/phases.json"],
+    inputs=[*build.glob("$(S)/*.c"), *build.glob("$(S)/*.h"), "$(S)/dev/strcc.py", "$(S)/dev/encode.py",
+            *build.glob("$(S)/dev/opt/*.py"), "$(S)/dev/phases.json"],
     outputs=["$(B)/libstr.a", "$(B)/post/report.txt"],
-    cmd=["python3", "$(S)/dev/strcc.py", "$(S)", "--emit", "obj", "-o", "$(B)/libstr.a"],
+    cmd=["python3", "$(S)/dev/strcc.py", "$(S)", "-o", "$(B)/libstr.a", "--out", "$(B)/post"],
     ldflags=["$(B)/libstr.a"],
-    descr="NC",
+    descr="CC",
     color="cyan",
 )
 install(libstr)
-group("native_libstr", libstr)
-
-command(
-    name="check_native_objects",
-    inputs=["$(S)/dev/compare_native.py", "$(S)/dev/cc/compare.py", "$(S)/dev/post.py"],
-    outputs=["$(B)/checks/native_objects.txt"],
-    deps=[reference_libstr, libstr],
-    cmd=["sh", "-c", 'python3 "$0" "$1" "$2" > "$3"', "$(S)/dev/compare_native.py", "$(B)/reference/libstr.a",
-         "$(B)/libstr.a", "$(B)/checks/native_objects.txt"],
-    descr="CK",
-    color="light-green",
-)
 
 # tst/test.c against the C library of the host: every level the host supports, and the dispatched table.
 test = program(
@@ -75,9 +63,10 @@ test = program(
 )
 
 checks = [
+    # The compiler against itself: the IR verified after every pass, the code decodable, the archive consistent.
     command(
         name="check_compiler",
-        inputs=["$(S)/tst/compiler.py", *build.glob("$(S)/dev/cc/*.py"), *build.glob("$(S)/dev/*.py"),
+        inputs=["$(S)/tst/compiler.py", *build.glob("$(S)/dev/opt/*.py"), *build.glob("$(S)/dev/*.py"),
                 *build.glob("$(S)/*.c"), *build.glob("$(S)/*.h")],
         outputs=["$(B)/checks/compiler.txt"],
         deps=[libstr],
