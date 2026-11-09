@@ -109,6 +109,7 @@ class ISel:
         self.const_here = {}     # (constant, block) -> the register it was put in there
         self.zext_ok = set()     # VRegs whose narrow (8/16-bit) value is zero-extended in them (movzx, kmov)
         self.pending_late = set()   # ops of the block held back to its end (they feed phis alone)
+        self.addr_here = {}         # (address value, block) -> the register a lea put it in there
         self.cmp_ins, self.cmp_cc = {}, {}   # a compare kept as a value: the instruction that set the flags, its condition
         self.block_of = {}
         self.skip = set()        # ops folded into their users
@@ -156,8 +157,12 @@ class ISel:
             # a load folded somewhere but also needed as a value: reload
             r = self.select_load(op)
         elif op in self.addr_only:
-            r = self.new('gpr')
-            self.emit('lea', Reg(r, 64), self.mem_operand(v, 8), acc='w r')
+            # an address wanted as a value: a lea where it is wanted, once per block
+            r = self.addr_here.get((v, self.block))
+            if r is None:
+                r = self.addr_here[(v, self.block)] = self.new('gpr')
+                self.emit('lea', Reg(r, 64), self.mem_operand(v, 8), acc='w r')
+            return r
         elif op in self.pending_late:
             # wanted before the end of the block after all: selected here
             self.pending_late.discard(op)
@@ -298,7 +303,8 @@ class ISel:
                     ok = (u.kind == 'load' and u.args[0] is op.result or u.kind == 'store' and u.args[0] is op.result
                           or u.kind == 'vop' and u.attrs.get('memory') and u.args[-1 if 'store' in u.attrs['name'] else 0] is op.result
                           and self.vop_address_index(u) is not None and u.args[self.vop_address_index(u)] is op.result
-                          or u in addr_only and u.kind != 'p2i')
+                          or u in addr_only and u.kind != 'p2i'
+                          or u.kind == 'phi' and op.kind == 'ptradd')     # (a lea where the phi's edge is, not in the loop body)
                     if not ok:
                         addr_only.discard(op)
                         changed = True
@@ -812,6 +818,15 @@ class ISel:
         a, b = op.args
         pred = op.attrs['pred']
         bits = max(a.ty.bits, 8)
+        if a.op.kind == 'vop' and a.op.attrs['name'] == 'cmpistri' and b.const == 16 and pred in ('ult', 'uge') \
+                and a.op in self.cmp_ins and a.op.block is self.fn_block:
+            # the index below 16: pcmpistri's carry, when nothing has touched the flags since
+            ins = self.cmp_ins[a.op]
+            for later in reversed(self.block.ins):
+                if later is ins:
+                    return 'b' if pred == 'ult' else 'ae'
+                if later.op in FLAG_WRITERS or FLAGS in later.imp_def or later.kind in ('call', 'cmp'):
+                    break
         if a in self.kview and pred in ('eq', 'ne') and b.const == 0 and a in self.vregs:
             r = Reg(self.vregs[a], 64 if a.ty.bits > 32 else 32)
             self.emit('test', r, r, acc='r r', kind='cmp')
@@ -851,6 +866,10 @@ class ISel:
                         self.emit('test', other, self.reg(x, bits), acc='r r', kind='cmp')   # test's memory operand comes first
                     else:
                         self.emit('test', self.reg(x, bits), other, acc='r r', kind='cmp')
+                return 'e' if pred == 'eq' else 'ne'
+            if a.op in self.skip and a.op.kind == 'load' and a not in self.vregs:
+                # the loaded value against zero: the compare reads the memory
+                self.emit('cmp', self.mem_operand(a.op.args[0], a.ty.size), Imm(0, min(bits, 32)), acc='r r', kind='cmp')
                 return 'e' if pred == 'eq' else 'ne'
             r = self.operand(a, bits, allow_imm=False, allow_mem=False)
             self.emit('test', r, r, acc='r r', kind='cmp')
@@ -1564,6 +1583,7 @@ class ISel:
         if name in ('cmpistri', 'cmpistra', 'cmpistrc', 'cmpistrz'):
             ins = self.pcmpistr(op, 'pcmpistri', args)
             if name == 'cmpistri':
+                self.cmp_ins[op] = self.block.ins[-1]      # its flags: CF when the index is below 16
                 dst = Reg(self.define(op.result).r, 32)
                 self.emit('mov', dst, Reg('rcx', 32), acc='w r', kind='copy')
                 self.clean32.add(dst.r)
