@@ -173,7 +173,14 @@ def assemble(mf, phase=0, jcc_align=False, loop_align=16):
     relocs [(offset, type, symbol, addend)] and labels {block: offset}."""
     order = mf.blocks
     position = {b: n for n, b in enumerate(order)}
-    headers = {b for b in order if b.loop_header}
+    # aligned: the block a loop's backward branch lands on (the header, or the
+    # body when the header was laid out after it: padding before a header at
+    # the bottom would run on every iteration)
+    headers = set()
+    for b in order:
+        for s in b.succs:
+            if position[s] <= position[b] and s.loops and s.loops & b.loops:
+                headers.add(s)
     items = []
     for n, b in enumerate(order):
         following = order[n + 1] if n + 1 < len(order) else None
