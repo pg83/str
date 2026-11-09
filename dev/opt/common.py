@@ -6,7 +6,7 @@ condition that only picks between a block's other way and its own successor
 is folded into that block's branch (c1 && c2 decided by one branch: the bit
 tests of one word then combine, simplify.py, and what remains is split
 back into jumps by the selection)."""
-from .ir import I1, PURE, DIVISIONS, Dominators
+from .ir import I1, PURE, DIVISIONS, Dominators, find_loops
 from .ifconv import speculable
 from .ssaupdate import repair
 
@@ -289,6 +289,89 @@ def duplicate_tails(fn, max_ops=1):
             preds = fn.preds()
         dom = Dominators(fn)
         changed = True
+    return changed
+
+
+# --------------------------------------------------------------- rotation
+
+def rotate_loops(fn, max_ops=4):
+    """A loop that tests its exit at the header (while) is made to test it at
+    its latch (do-while): the header's compare is copied into the preheader,
+    which then guards the first iteration, and into the latch, which then
+    branches back itself; the entry falls into the body (no jump to a header
+    laid out below), the body's first block takes the phis."""
+    changed = False
+    for _ in range(16):
+        dom = Dominators(fn)
+        info = find_loops(fn, dom)
+        preds = fn.preds()
+        done = False
+        for loop in info.loops:
+            h = loop.header
+            if h.term.kind != 'br' or h.attrs.get('rotated') or len(preds[h]) != 2 or len(loop.latches) != 1:
+                continue
+            outside = [p for p in preds[h] if p not in loop.blocks]
+            if len(outside) != 1:
+                continue
+            pre, latch = outside[0], loop.latches[0]
+            if pre.term.kind != 'jmp' or latch.term.kind != 'jmp' or latch is h or h.term.targets[0] is h.term.targets[1]:
+                continue
+            inside = [x in loop.blocks for x in h.term.targets]
+            if inside.count(True) != 1:
+                continue
+            ops = body(h)
+            if len(ops) > max_ops or not all(speculable(op) for op in ops):
+                continue
+            copies = {}
+            for p in (pre, latch):
+                mapping = {phi.result: phi.incoming(p) for phi in h.phis()}
+                for op in ops:
+                    new = fn.new(op.kind, [mapping.get(a, a) for a in op.args], tys=[r.ty for r in op.results], attrs=dict(op.attrs))
+                    p.append(new)
+                    for r, nr in zip(op.results, new.results):
+                        mapping[r] = nr
+                t = fn.new('br', [mapping.get(h.term.args[0], h.term.args[0])], attrs=dict(h.term.attrs))
+                t.targets = list(h.term.targets)
+                p.set_term(t)
+                for s in h.term.targets:
+                    for phi in s.phis():
+                        v = phi.incoming(h)
+                        phi.add_incoming(p, mapping.get(v, v))
+                copies[p] = mapping
+            for s in h.term.targets:
+                for phi in s.phis():
+                    if h in phi.preds:
+                        phi.remove_incoming(h)
+            entry = h.term.targets[inside.index(True)]
+            h.term.targets = []
+            preds = fn.preds()
+            inner = loop.blocks - {h}
+            outside_defs = {}
+            for v in [phi.result for phi in h.phis()] + [op.result for op in ops if op.result is not None]:
+                users = [u for u in v.uses if u.block is not h]
+                if any(u.block in inner for u in users):
+                    # inside the loop the value is the phi at its new head (a use in the latch
+                    # itself reads the start of the block, which the updater does not model)
+                    phi = fn.phi(v.ty)
+                    entry.insert(0, phi)
+                    phi.add_incoming(pre, copies[pre][v])
+                    phi.add_incoming(latch, copies[latch][v])
+                    for u in users:
+                        if u.block in inner:
+                            u.replace_arg(v, phi.result)      # (at the end of any block of the loop the value is this iteration's)
+                if any(u.block not in inner for u in v.uses if u.block is not h):
+                    outside_defs[v] = [(pre, copies[pre][v]), (latch, copies[latch][v])]
+            if outside_defs:
+                repair(fn, outside_defs, preds)
+            for op in reversed(h.ops):
+                op.detach()
+            h.term.detach()
+            fn.blocks.remove(h)
+            entry.attrs['rotated'] = True
+            changed = done = True
+            break
+        if not done:
+            break
     return changed
 
 

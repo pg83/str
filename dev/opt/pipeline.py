@@ -7,7 +7,7 @@ motion and sinking."""
 import os
 
 from .cfgsimp import simplify_cfg, split_returns
-from .common import duplicate_tails, merge_tails
+from .common import duplicate_tails, merge_tails, rotate_loops
 from .cse import cse
 from .cvp import cvp
 from .ifconv import ifconv
@@ -140,4 +140,11 @@ def optimize(module):
         inline_calls(module, fn, calls)
         check(fn, 'inline')
         late(fn)
+    # the loops' shape last, once nothing is inlined or unrolled any more
+    # (the unrollers read the header-tested form)
+    for fn in module.emitted():
+        if rotate_loops(fn):
+            check(fn, 'rotate_loops')
+            cleanup(fn)
+            dead_code(fn)
     return module
