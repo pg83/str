@@ -7,7 +7,7 @@ motion and sinking."""
 import os
 
 from .cfgsimp import simplify_cfg, split_returns
-from .common import duplicate_tails, merge_tails, rotate_loops
+from .common import duplicate_tails, merge_ivs, merge_tails, rotate_loops
 from .cse import cse
 from .cvp import cvp
 from .ifconv import ifconv
@@ -146,5 +146,8 @@ def optimize(module):
         if rotate_loops(fn):
             check(fn, 'rotate_loops')
             cleanup(fn)
+            if merge_ivs(fn):
+                check(fn, 'merge_ivs')
+                cleanup(fn)
             dead_code(fn)
     return module

@@ -294,6 +294,79 @@ def duplicate_tails(fn, max_ops=1):
 
 # --------------------------------------------------------------- rotation
 
+def split_edge(fn, p, h):
+    """A block of its own on the edge p -> h (a jump to h), the phis of h
+    taking it for p. False when p reaches h both ways (an edge of its own
+    either way would need two)."""
+    if p.term.targets.count(h) != 1:
+        return False
+    mid = fn.block(h.name + '.pre')
+    jmp = fn.new('jmp')
+    jmp.targets = [h]
+    mid.set_term(jmp)
+    p.term.targets = [mid if t is h else t for t in p.term.targets]
+    for phi in h.phis():
+        phi.preds = [mid if q is p else q for q in phi.preds]
+    return True
+
+
+def base_offset(v):
+    """(base, c) with v = base + c, adds of constants peeled; base None for a constant."""
+    c = 0
+    while v.op.kind == 'add' and v.op.args[1].const is not None:
+        c += v.op.args[1].const
+        v = v.op.args[0]
+    if v.const is not None:
+        return None, c + v.const
+    return v, c
+
+
+def merge_ivs(fn):
+    """Two phis of a block that differ by a constant on every way in (off
+    and off + 32 of a loop rotated to test off + 32 < n at its latch) are
+    one: the other is that one plus the constant, so the loop moves one
+    register (clang's form: the blocks at -32 from it)."""
+    changed = False
+    for b in fn.blocks:
+        phis = [p for p in b.phis() if p.ty.kind in ('i', 'p')]
+        for p in phis:
+            if p.block is None:
+                continue
+            for q in phis:
+                if q is p or q.block is None or q.ty is not p.ty:
+                    continue
+                c = None
+                for pred in p.preds:
+                    bp, cp = base_offset(p.incoming(pred))
+                    bq, cq = base_offset(q.incoming(pred))
+                    # the latch's p is often q itself: q's value then, with the offset known
+                    if bp is not bq:
+                        c = None
+                        break
+                    d = (cq - cp) & p.ty.mask
+                    if c is None:
+                        c = d
+                    elif c != d:
+                        c = None
+                        break
+                if not c:
+                    continue
+                # p = q - c at the head: q is the one that steps (its way round reads q, not p)
+                if not any(base_offset(q.incoming(pred))[0] is q.result for pred in q.preds):
+                    continue
+                minus = fn.new('add', [q.result, fn.const(p.ty, -c)], p.ty)
+                b.insert(len(b.phis()), minus)
+                for u in list(p.result.uses):
+                    if u is minus:
+                        continue
+                    u.replace_arg(p.result, minus.result)
+                p.detach()
+                b.remove(p)
+                changed = True
+                break
+    return changed
+
+
 def rotate_loops(fn, max_ops=4):
     """A loop that tests its exit at the header (while) is made to test it at
     its latch (do-while): the header's compare is copied into the preheader,
@@ -314,7 +387,7 @@ def rotate_loops(fn, max_ops=4):
             if len(outside) != 1:
                 continue
             pre, latch = outside[0], loop.latches[0]
-            if pre.term.kind != 'jmp' or latch.term.kind != 'jmp' or latch is h or h.term.targets[0] is h.term.targets[1]:
+            if latch.term.kind != 'jmp' or latch is h or h.term.targets[0] is h.term.targets[1]:
                 continue
             inside = [x in loop.blocks for x in h.term.targets]
             if inside.count(True) != 1:
@@ -322,6 +395,12 @@ def rotate_loops(fn, max_ops=4):
             ops = body(h)
             if len(ops) > max_ops or not all(speculable(op) for op in ops):
                 continue
+            if pre.term.kind != 'jmp':
+                # the loop entered from a branch: a block of its own before the header takes the guard
+                if not split_edge(fn, pre, h):
+                    continue
+                done = changed = True
+                break
             copies = {}
             for p in (pre, latch):
                 mapping = {phi.result: phi.incoming(p) for phi in h.phis()}
