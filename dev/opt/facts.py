@@ -148,6 +148,8 @@ class Facts:
             c = op.attrs['value']
             return c, c
         lo, hi = full
+        if k == 'param' and 'range' in op.attrs:
+            lo, hi = op.attrs['range']
         if k == 'urem' and op.args[1].const:
             hi = op.args[1].const - 1
         elif k == 'cttz':

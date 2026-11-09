@@ -52,6 +52,10 @@ def order_blocks(mf):
         for s in succs:
             if index[s] <= index[b] or b.loops and b.loops <= s.loops and not all(b.loops <= x.loops for x in succs):
                 return [s] + [x for x in succs if x is not s]
+        # a value tested against zero is likelier not to be zero
+        if len(b.ins) >= 2 and b.ins[-1].kind == 'jcc' and b.ins[-1].cc in ('e', 'ne') and b.ins[-2].op == 'test' \
+                and len(b.ins[-2].ops) == 2 and all(isinstance(o, Reg) for o in b.ins[-2].ops) and b.ins[-2].ops[0].r == b.ins[-2].ops[1].r:
+            return [succs[1], succs[0]] if b.ins[-1].cc == 'e' else list(succs)
         return list(succs)
 
     cold = set()

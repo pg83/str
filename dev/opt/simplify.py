@@ -232,6 +232,18 @@ class Simplifier:
                 op.set_arg(2, a)
                 self.requeue(op)
                 return None
+            if c.op.kind == 'icmp' and c.op.attrs['pred'] in ('eq', 'ne') and c.op.args[1].const == 0 and a.const is not None and b.const is not None \
+                    and c.op.args[0].ty is op.ty and self.facts.range(c.op.args[0]) == (0, 1):
+                # x in {0, 1} picks between two constants: arithmetic on x
+                x = c.op.args[0]
+                hi, lo = (a.const, b.const) if c.op.attrs['pred'] == 'ne' else (b.const, a.const)   # x = 1 gives hi
+                mask = op.ty.mask
+                if hi == (lo + 1) & mask:
+                    return x if lo == 0 else self.new(op, 'add', [x, self.fn.const(op.ty, lo)], op.ty)
+                if lo == (hi + 1) & mask:
+                    if hi == 0:
+                        return self.new(op, 'xor', [x, self.fn.const(op.ty, 1)], op.ty)
+                    return self.new(op, 'sub', [self.fn.const(op.ty, lo), x], op.ty)
             t = bit_test(c)
             if t is not None and power_of_two(t[1]) and t[0].ty is op.ty and a.const is not None and b.const is not None:
                 # (x & 2^n) ? 2^k : 0 is the bit shifted into place
@@ -497,6 +509,8 @@ class Simplifier:
                         return self.new(op, 'icmp', [self.new(op, 'and', [x.op.args[0], self.fn.const(ty, m << n)], ty), b], I1, pred=pred)
                     if x.op.kind == 'shl' and m & ((1 << n) - 1) == 0:
                         return self.new(op, 'icmp', [self.new(op, 'and', [x.op.args[0], self.fn.const(ty, m >> n)], ty), b], I1, pred=pred)
+            if pred in ('eq', 'ne') and cb == 0 and inner.kind == 'xor' and inner.args[1].const is None and len(a.uses) == 1:
+                return self.new(op, 'icmp', [inner.args[0], inner.args[1]], I1, pred=pred)   # x ^ y == 0: x == y
             if pred in ('eq', 'ne') and cb == 0 and inner.kind == 'lshr' and inner.args[1].const is not None and inner.args[1].const < ty.bits:
                 # x >> n against zero: x against 2^n
                 return self.new(op, 'icmp', [inner.args[0], self.fn.const(ty, 1 << inner.args[1].const)], I1, pred='ult' if pred == 'eq' else 'uge')

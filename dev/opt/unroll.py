@@ -9,7 +9,7 @@ i + 1's header; the copies' comparisons fold to constants afterwards and the
 paths they rule out disappear. Data-dependent exits stay in each copy. Values
 the loop defines and code after it uses get the copy that reaches the use
 (ssaupdate.py)."""
-from .ir import Dominators, find_loops
+from .ir import Dominators, find_loops, I1
 from .simplify import compare
 from .ssaupdate import SSAUpdater
 
@@ -24,6 +24,20 @@ def induction(phi, pre, latch):
     if start is None or nxt.op.kind != 'add' or nxt.op.args[0] is not phi.result or nxt.op.args[1].const is None:
         return None
     return start, nxt.op.args[1].const
+
+
+def conditions(v, exit_when):
+    """The comparisons whose truth (exit_when) alone leaves the loop: v itself,
+    the conjuncts of an and the loop leaves on being false, the disjuncts of
+    an or it leaves on being true, through negations."""
+    op = v.op
+    if op.kind == 'icmp':
+        return [(op, exit_when)]
+    if v.ty is I1 and op.kind == 'xor' and op.args[1].const == 1:
+        return conditions(op.args[0], not exit_when)
+    if v.ty is I1 and (op.kind == 'and' and not exit_when or op.kind == 'or' and exit_when):
+        return conditions(op.args[0], exit_when) + conditions(op.args[1], exit_when)
+    return []
 
 
 def trip_count(fn, loop, preds, dom):
@@ -43,31 +57,30 @@ def trip_count(fn, loop, preds, dom):
         inside = [x in loop.blocks for x in t.targets]
         if inside.count(False) != 1:
             continue
-        exit_when = not inside[0]
-        c = t.args[0].op
-        if c.kind != 'icmp' or c.args[1].const is None:
-            continue
-        x, bound, pred = c.args[0], c.args[1].const, c.attrs['pred']
-        width = x.ty.bits
-        stepped = 0
-        if x.op.kind == 'add' and x.op.args[1].const is not None and x.op.args[0].op.kind == 'phi':
-            phi, stepped = x.op.args[0].op, 1
-        elif x.op.kind == 'phi':
-            phi = x.op
-        else:
-            continue
-        if phi.block is not header:
-            continue
-        iv = induction(phi, pre, latch)
-        if iv is None or stepped and x is not phi.incoming(latch):
-            continue
-        start, step = iv
-        for i in range(MAX_COPIES + 1):
-            value = (start + step * (i + stepped)) & x.ty.mask
-            if compare(pred, value, bound, width) == exit_when:
-                if best is None or i < best:
-                    best = i
-                break
+        for c, exit_when in conditions(t.args[0], not inside[0]):
+            if c.args[1].const is None:
+                continue
+            x, bound, pred = c.args[0], c.args[1].const, c.attrs['pred']
+            width = x.ty.bits
+            stepped = 0
+            if x.op.kind == 'add' and x.op.args[1].const is not None and x.op.args[0].op.kind == 'phi':
+                phi, stepped = x.op.args[0].op, 1
+            elif x.op.kind == 'phi':
+                phi = x.op
+            else:
+                continue
+            if phi.block is not header:
+                continue
+            iv = induction(phi, pre, latch)
+            if iv is None or stepped and x is not phi.incoming(latch):
+                continue
+            start, step = iv
+            for i in range(MAX_COPIES + 1):
+                value = (start + step * (i + stepped)) & x.ty.mask
+                if compare(pred, value, bound, width) == exit_when:
+                    if best is None or i < best:
+                        best = i
+                    break
     if best is None:
         return None
     return best, pre, latch

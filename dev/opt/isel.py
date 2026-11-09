@@ -174,7 +174,12 @@ class ISel:
     def materialize(self, v):
         c = v.const
         if v.ty.is_vec:
-            r = self.new('vec')
+            r = self.const_reg(v)
+            if r is None:
+                r = self.const_here.get((v, self.block))
+            if r is not None:
+                return r
+            r = self.const_here[(v, self.block)] = self.new('vec')
             size = v.ty.size
             if c == bytes(size):
                 self.emit('vpxor' if self.vex else 'pxor', Reg(r, 128), Reg(r, 128), Reg(r, 128), acc='w r r', kind='zero') if self.vex \
@@ -254,6 +259,21 @@ class ISel:
                     continue
                 if self.can_fold_load(op, user):
                     self.skip.add(op)
+        # a masked load feeding one masked compare under the same mask: the compare's memory operand
+        for b in fn.blocks:
+            for i, op in enumerate(b.ops):
+                if op.kind != 'vop' or op.attrs['name'] != 'masked_load' or len(op.result.uses) != 1:
+                    continue
+                user = op.result.uses[0]
+                ub, ui = self.uses_at.get(user, (None, None))
+                if ub is not b or user.kind != 'vop' or not user.attrs['name'].endswith('_masked') or user.args[0] is not op.args[0]:
+                    continue
+                if any(x.writes_memory or x.kind in ('call', 'asm') for x in b.ops[i + 1:ui]):
+                    continue
+                if user.args[1] is op.result and user.args[2] is not op.result and not (user.args[2].op.kind == 'vop' and user.args[2].op in self.skip):
+                    user.args[1], user.args[2] = user.args[2], user.args[1]     # (symmetric compares)
+                if user.args[2] is op.result and user.args[1] is not op.result:
+                    self.skip.add(op)
         # comparisons folded into their users
         for b in fn.blocks:
             for op in b.ops:
@@ -282,6 +302,11 @@ class ISel:
         if op.kind in ('and', 'or') and v.ty is I1 and len(v.uses) == 1 and self.uses_at.get(op, (None,))[0] is b:
             inner = [self.logic_tree(a, b) for a in op.args]
             if all(inner):
+                self.skip.add(op)
+                return True
+            return False
+        if op.kind == 'xor' and v.ty is I1 and op.args[1].const == 1 and len(v.uses) == 1 and self.uses_at.get(op, (None,))[0] is b:
+            if self.logic_tree(op.args[0], b):
                 self.skip.add(op)
                 return True
             return False
@@ -362,7 +387,7 @@ class ISel:
             if op.kind == 'alloca' and x not in self.vregs and slot is None and base is None:
                 slot = self.slot_of(op)
                 return
-            if op.kind in ('ptradd', 'add') and op.args[1].const is not None and x.ty.bits == 64 and op not in self.skip \
+            if op.kind in ('ptradd', 'add') and op.args[1].const is not None and x.ty.bits == 64 and op not in self.skip and x not in self.vregs \
                     and (op in self.addr_only or op.args[0] in self.vregs or op.args[0].op.kind == 'param'):
                 # p + c: the displacement takes c even when p + c itself is wanted elsewhere
                 add_part(op.args[0])
@@ -473,7 +498,7 @@ class ISel:
             self.fn_block = b
             self.block.succs = [self.block_of[s] for s in b.succs]
             for v in self.const_at.get(b, ()):
-                self.vregs[v] = self.materialize(v)
+                self.const_targets.setdefault(v, {})[b] = self.materialize(v)
             ops = [op for op in b.ops if op.kind != 'phi' and op not in self.skip and op not in self.addr_only]
             late = [op for op in ops if op.kind in ir.PURE and op.kind not in ir.DIVISIONS and op.result is not None
                     and op.result.uses and all(u.kind == 'phi' or u in self.addr_only for u in op.result.uses)
@@ -506,39 +531,49 @@ class ISel:
         return False
 
     def place_constants(self):
-        """Where each vector constant is materialized: the nearest block that
-        dominates its uses, outside the loops that hold them all."""
+        """Where each vector constant is materialized: a use outside any loop
+        that can take it as a memory operand does; the others get a register
+        in their block, or before the outermost loop around it. Several
+        regions of uses get several registers, each where it dominates its
+        uses (const_reg finds the one in force)."""
         fn = self.fn
-        dom = ir.Dominators(fn)
+        dom = self.dom = ir.Dominators(fn)
         loops = ir.find_loops(fn, dom)
         self.const_at = {}
+        self.const_targets = {}
         for v in list(fn.consts.values()):
             if v.op.kind != 'const' or not v.ty.is_vec or not v.uses:
                 continue
             idiom = v.const == bytes(v.ty.size) or v.const == b'\xff' * v.ty.size
-            if not idiom and all(self.foldable_constant_use(v, u) for u in v.uses):
-                continue
-            blocks = set()
             for u in v.uses:
-                if u.kind == 'phi':
-                    blocks.update(p for p, a in zip(u.preds, u.args) if a is v)
-                elif u.block is not None:
-                    blocks.add(u.block)
-            blocks = [b for b in blocks if b in dom.pre]
-            if not blocks:
-                continue
-            lca = blocks[0]
-            for b in blocks[1:]:
-                lca = dom.lca(lca, b)
-            while True:
-                loop = loops.of.get(lca)
-                if loop is None or not all(b in loop.blocks for b in blocks):
-                    break
-                parent = dom.parent(loop.header)
-                if parent is None:
-                    break
-                lca = parent
-            self.const_at.setdefault(lca, []).append(v)
+                blocks = [p for p, a in zip(u.preds, u.args) if a is v] if u.kind == 'phi' else [u.block] if u.block is not None else []
+                for ub in blocks:
+                    if ub not in dom.pre:
+                        continue
+                    if not idiom and loops.depth(ub) == 0 and self.foldable_constant_use(v, u):
+                        continue
+                    t = ub
+                    while True:
+                        loop = loops.of.get(t)
+                        if loop is None or dom.parent(loop.header) is None:
+                            break
+                        t = dom.parent(loop.header)
+                    at = self.const_at.setdefault(t, [])
+                    if v not in at:
+                        at.append(v)
+
+    def const_reg(self, v):
+        """The register holding the vector constant v where the block being selected is, or None."""
+        targets = self.const_targets.get(v)
+        if not targets:
+            return None
+        b = self.fn_block
+        while b is not None:
+            r = targets.get(b)
+            if r is not None:
+                return r
+            b = self.dom.parent(b)
+        return None
 
     def select_params(self):
         self.block = self.mf.entry
@@ -646,6 +681,9 @@ class ISel:
     def branch(self, v, yes, no, weights):
         """A branch on v to yes or no: one jump per condition of an and/or tree."""
         op = v.op
+        if op in self.skip and op.kind == 'xor' and v.ty is I1:
+            self.branch(op.args[0], no, yes, weights[::-1] if weights else None)
+            return
         if op in self.skip and op.kind in ('and', 'or') and v.ty is I1:
             a, b = op.args
             mid = self.mf.block(self.block.name + '.c')
@@ -977,12 +1015,14 @@ class ISel:
             self.emit('mov', dst, self.reg(a, bits), acc='w r', kind='copy')
             self.emit('imul', dst, self.operand(b, bits, allow_imm=False), acc='rw r')
 
-    def count(self, b, bits):
-        """The register for a shift count: the hardware keeps its low bits only, so a mask of them goes."""
+    def count(self, b, bits, keep=None):
+        """The register for a shift count: the hardware keeps its low bits only
+        (keep, bits - 1 by default), so a mask of them and the extensions go."""
+        keep = bits - 1 if keep is None else keep
         v = b
-        while v.op.kind in ('trunc', 'zext') and v.op in self.skip or v.op.kind == 'trunc' and v.ty.bits >= 8:
+        while v.op.kind in ('trunc', 'zext') and v.ty.bits >= 8 and v.op.args[0].ty.bits >= 8 and not v.op.args[0].ty.is_vec:
             v = v.op.args[0]
-        if v.op.kind == 'and' and v.op.args[1].const is not None and v.op.args[1].const & (bits - 1) == bits - 1:
+        if v.op.kind == 'and' and v.op.args[1].const is not None and v.op.args[1].const & keep == keep:
             v = v.op.args[0]
         return self.reg(v, bits)
 
@@ -1181,7 +1221,7 @@ class ISel:
         a, n = op.args
         bits = 64 if op.ty.bits == 64 else 32
         dst = Reg(self.define(op.result).r, bits)
-        self.emit('bzhi', dst, self.operand(a, bits, allow_imm=False), self.reg(n, bits), acc='w r r')
+        self.emit('bzhi', dst, self.operand(a, bits, allow_imm=False), self.count(n, bits, 255), acc='w r r')
         if bits == 32:
             self.clean32.add(dst.r)
 
@@ -1290,8 +1330,11 @@ class ISel:
     # ------------------------------------------------------------ vectors
 
     def vop_operand(self, v):
-        if v.op.kind == 'const' and v.ty.is_vec and v not in self.vregs:
-            return self.constant_operand(v.const)
+        if v.op.kind == 'const' and v.ty.is_vec:
+            r = self.const_reg(v)
+            return Reg(r, v.ty.bits) if r is not None else self.constant_operand(v.const)
+        if v.op.kind == 'vop' and v.op in self.skip and v.op.attrs['name'] == 'masked_load' and v not in self.vregs:
+            return self.mem_operand(v.op.args[1], v.ty.size)
         return self.operand(v, allow_imm=False)
 
     def sel_vop(self, op):

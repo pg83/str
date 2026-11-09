@@ -74,9 +74,54 @@ def late(fn):
         check(fn, 'simplify_cfg')
 
 
+def param_ranges(module):
+    """A static function called with constants alone in some argument position
+    knows that parameter's range (truffle_scan's members, 0 or 1)."""
+    known = {}       # (function, parameter index) -> (lo, hi), False when some call passes anything
+    for _ in range(8):
+        seen = {}
+        for fn in module.functions.values():
+            for op in fn.ops():
+                if op.kind != 'call':
+                    continue
+                c = callee_of(op, module)
+                if c is None:
+                    continue
+                ranges = seen.setdefault(c.name, [None] * len(c.params))
+                for i, a in enumerate(op.args[1:len(c.params) + 1]):
+                    if ranges[i] is False:
+                        continue
+                    if a.const is not None:
+                        r = (a.const, a.const)
+                    elif a.op.kind == 'param' and known.get((fn.name, a.op.attrs['index'])):
+                        r = known[(fn.name, a.op.attrs['index'])]      # a parameter passed on, its range known so far
+                    elif a.op.kind == 'param' and known.get((fn.name, a.op.attrs['index'])) is None and fn.attrs.get('static'):
+                        continue                                        # not known yet: another round may tell
+                    else:
+                        ranges[i] = False
+                        continue
+                    lo, hi = ranges[i] if ranges[i] else r
+                    ranges[i] = (min(lo, r[0]), max(hi, r[1]))
+        new = {}
+        for name, ranges in seen.items():
+            fn = module.functions[name]
+            if not fn.attrs.get('static') or fn.attrs.get('address_taken'):
+                continue
+            for i, (p, r) in enumerate(zip(fn.params, ranges)):
+                if p.ty.kind == 'i':
+                    new[(name, i)] = r
+        if new == known:
+            break
+        known = new
+    for (name, i), r in known.items():
+        if r:
+            module.functions[name].params[i].op.attrs['range'] = r
+
+
 def optimize(module):
     for fn in module.functions.values():
         early(fn)
+    param_ranges(module)
     calls = {}
     for fn in module.functions.values():
         for b in fn.blocks:

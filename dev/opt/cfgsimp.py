@@ -3,8 +3,9 @@ blocks removed, a block merged into its only predecessor, empty blocks
 bypassed, and jumps threaded: a block whose branch is decided by the values
 a predecessor brings (a phi of constants after inlining, say) is copied for
 that predecessor, the copy jumping straight to the known target."""
-from .ir import Op, Dominators, I1
+from .ir import Op, Dominators, I1, INVERT
 from .common import fold_conditions, hoist_common
+from .cvp import bound
 from .facts import Facts
 from .simplify import fold_int, compare, decide
 from .ssaupdate import repair
@@ -127,6 +128,26 @@ def evaluate(op, env):
     return None
 
 
+def edge_range(facts, v, p, b):
+    """The range of v on the edge p -> b: its own, narrowed by p's branch when that compares v with a constant."""
+    lo, hi = facts.range(v)
+    t = p.term
+    if t.kind == 'br' and t.targets[0] is not t.targets[1] and v.ty.kind in ('i', 'p'):
+        c = t.args[0].op
+        true_edge = t.targets[0] is b
+        if c.kind == 'icmp' and c.args[0] is v and c.args[1].const is not None:
+            pred = c.attrs['pred'] if true_edge else INVERT[c.attrs['pred']]
+            if pred in ('slt', 'sle', 'sgt', 'sge'):
+                half = 1 << (v.ty.bits - 1)
+                pred = 'u' + pred[1:] if hi < half and c.args[1].const < half else None
+            interval = bound(pred, c.args[1].const, v.ty.bits) if pred else None
+            if interval is not None:
+                lo, hi = max(lo, interval[0]), min(hi, interval[1])
+        elif t.args[0] is v:
+            lo, hi = (1, 1) if true_edge else (0, 0)
+    return (lo, hi) if lo <= hi else facts.range(v)
+
+
 def thread(fn, limit=8):
     """Copy a small block for each predecessor that decides its branch."""
     changed = False
@@ -145,6 +166,12 @@ def thread(fn, limit=8):
         cond = b.term.args[0]
         for p in list(preds[b]):
             env = {phi.result: phi.incoming(p).const for phi in phis if phi.incoming(p).const is not None}
+            for phi in phis:
+                v = phi.incoming(p)
+                if v.const is None and v.ty.kind == 'i':
+                    lo, hi = edge_range(base, v, p, b)
+                    if lo == hi:
+                        env[phi.result] = lo       # p's own branch fixes the value it passes
             c = None
             if env:
                 for op in body:
@@ -153,8 +180,8 @@ def thread(fn, limit=8):
                         env[op.result] = v
                 c = env.get(cond, cond.const)
             if c is None and cond.op.kind == 'icmp' and phis:
-                # what the incoming values' ranges decide
-                facts = Facts(fn, {phi.result: base.range(phi.incoming(p)) for phi in phis})
+                # what the incoming values' ranges decide, the predecessor's own branch included
+                facts = Facts(fn, {phi.result: edge_range(base, phi.incoming(p), p, b) for phi in phis})
                 x, y = cond.op.args
                 pred = cond.op.attrs['pred']
                 lo1, hi1 = facts.range(x)
