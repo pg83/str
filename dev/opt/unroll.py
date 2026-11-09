@@ -8,7 +8,12 @@ then copied once per iteration, iteration i's latch jumping to iteration
 i + 1's header; the copies' comparisons fold to constants afterwards and the
 paths they rule out disappear. Data-dependent exits stay in each copy. Values
 the loop defines and code after it uses get the copy that reaches the use
-(ssaupdate.py)."""
+(ssaupdate.py).
+
+A small loop whose count is not known (a header test of an induction
+variable against a bound from outside, no other exit) is unrolled four
+times at run time: four copies in a row run while four more iterations fit,
+the loop itself takes the rest."""
 from .ir import Dominators, find_loops, I1
 from .simplify import compare
 from .ssaupdate import SSAUpdater
@@ -167,6 +172,119 @@ def unroll_loop(fn, loop, exit_at, pre, latch):
     fn.remove_unreachable()
 
 
+RUNTIME_UNROLL = 4
+RUNTIME_MAX_OPS = 16
+
+
+def runtime_candidate(fn, loop, preds):
+    """A small loop testing an induction variable against a bound known
+    outside it at its header, leaving nowhere else: (pre, latch, phi, step,
+    bound, body target) or None."""
+    header = loop.header
+    if header.attrs.get('nounroll') or header.attrs.get('unrolled'):
+        return None
+    outside = [p for p in preds[header] if p not in loop.blocks]
+    if len(outside) != 1 or len(loop.latches) != 1:
+        return None
+    pre, latch = outside[0], loop.latches[0]
+    if pre.term.kind != 'jmp':
+        return None
+    t = header.term
+    if t.kind != 'br' or t.targets[0] is t.targets[1]:
+        return None
+    inside = [x in loop.blocks for x in t.targets]
+    if inside != [True, False]:
+        return None
+    for b in loop.blocks:
+        if b is not header and any(x not in loop.blocks for x in b.term.targets):
+            return None
+        if any(op.kind == 'call' for op in b.ops):
+            return None
+    if sum(len(b.ops) for b in loop.blocks) > RUNTIME_MAX_OPS:
+        return None
+    c = t.args[0].op
+    if c.kind != 'icmp' or c.attrs['pred'] != 'ult':
+        return None
+    i, n = c.args
+    if i.op.kind != 'phi' or i.op.block is not header:
+        return None
+    if n.const is None and n.op.block in loop.blocks:
+        return None
+    nxt = i.op.incoming(latch)
+    if nxt.op.kind != 'add' or nxt.op.args[0] is not i or nxt.op.args[1].const is None or nxt.op.args[1].const == 0:
+        return None
+    return pre, latch, i.op, nxt.op.args[1].const, n, t.targets[0]
+
+
+def unroll_runtime(fn, loop, pre, latch, phi, step, bound, body, count=RUNTIME_UNROLL):
+    """The loop copied count times in a row, entered while count more
+    iterations fit (i + step * (count - 1) < bound); the original loop takes
+    what is left. The copies' headers jump straight into their bodies."""
+    header = loop.header
+    order = [b for b in fn.rpo() if b in loop.blocks]
+    main = fn.block(header.name + '.main')
+    main.attrs['unrolled'] = True
+    header.attrs['unrolled'] = True
+    main_phis = {}
+    for old in header.phis():
+        np = fn.phi(old.ty)
+        main.append(np)
+        np.add_incoming(pre, old.incoming(pre))
+        main_phis[old] = np
+    copies = []
+    prev_vm = None
+    for k in range(count):
+        bm = {b: (main if k == 0 and b is header else fn.block('%s.u%d' % (b.name, k))) for b in order}
+        vm = {}
+        for old in header.phis():
+            vm[old.result] = main_phis[old].result if k == 0 else prev_vm.get(old.incoming(latch), old.incoming(latch))
+        pending = []
+        for b in order:
+            nb = bm[b]
+            for op in b.ops:
+                if op.kind == 'phi':
+                    if b is header:
+                        continue
+                    new = fn.phi(op.ty)
+                    nb.append(new)
+                    pending.append((op, new))
+                else:
+                    new = fn.new(op.kind, [vm.get(a, a) for a in op.args], tys=[r.ty for r in op.results], attrs=dict(op.attrs))
+                    nb.append(new)
+                for r, nr in zip(op.results, new.results):
+                    vm[r] = nr
+        for old, new in pending:
+            for p, a in zip(old.preds, old.args):
+                new.add_incoming(bm[p], vm.get(a, a))
+        copies.append((bm, vm))
+        prev_vm = vm
+    for k, (bm, vm) in enumerate(copies):
+        for b in order:
+            t = b.term
+            if b is header:
+                if k == 0:
+                    ahead = fn.new('add', [main_phis[phi].result, fn.const(phi.ty, step * (count - 1))], phi.ty)
+                    main.append(ahead)
+                    cond = fn.new('icmp', [ahead.result, bound], I1, {'pred': 'ult'})
+                    main.append(cond)
+                    new = fn.new('br', [cond.result])
+                    new.targets = [bm[body], header]
+                else:
+                    new = fn.new('jmp')
+                    new.targets = [bm[body]]
+            else:
+                new = fn.new(t.kind, [vm.get(a, a) for a in t.args], attrs=dict(t.attrs))
+                new.targets = [(copies[k + 1][0][header] if k + 1 < count else main) if x is header else bm[x] for x in t.targets]
+            bm[b].set_term(new)
+    last_bm, last_vm = copies[-1]
+    for old, np in main_phis.items():
+        v = old.incoming(latch)
+        np.add_incoming(last_bm[latch], last_vm.get(v, v))
+        old.add_incoming(main, np.result)
+        old.remove_incoming(pre)
+    pre.term.targets = [main if x is header else x for x in pre.term.targets]
+
+
 def unroll(fn):
     changed = False
     for _ in range(64):
@@ -179,7 +297,13 @@ def unroll(fn):
                 continue
             tc = trip_count(fn, loop, preds, dom)
             if tc is None:
-                continue
+                cand = runtime_candidate(fn, loop, preds)
+                if cand is None:
+                    continue
+                pre, latch, phi, step, bound, body = cand
+                unroll_runtime(fn, loop, pre, latch, phi, step, bound, body)
+                changed = done = True
+                break
             exit_at, pre, latch = tc
             size = sum(len(b.ops) + 1 for b in loop.blocks)
             if exit_at + 1 > MAX_COPIES or size * (exit_at + 1) > MAX_OPS:

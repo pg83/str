@@ -1645,6 +1645,12 @@ class ISel:
             self.emit('vmovd', Reg(dst.r, 128), self.reg(x, 32), acc='w r')
             self.emit('vpbroadcastb', Reg(dst.r, bits), Reg(dst.r, 128), acc='w r')
             return
+        if self.isa == 'sse42':
+            # SSSE3: shuffle the byte everywhere by an all-zero index
+            zero = self.materialize(self.fn.const(op.ty, bytes(16)))
+            self.emit('movd', Reg(dst.r, 128), self.reg(x, 32), acc='w r')
+            self.emit('pshufb', Reg(dst.r, 128), Reg(zero, 128), acc='rw r')
+            return
         # SSE2: the byte in every lane by unpack and shuffles
         self.emit('movd', Reg(dst.r, 128), self.reg(x, 32), acc='w r')
         self.emit('punpcklbw', Reg(dst.r, 128), Reg(dst.r, 128), acc='rw r')
