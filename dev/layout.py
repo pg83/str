@@ -46,6 +46,7 @@ class Layout:
         self.offsets = {}
         self.relocs = []
         self.pending = []
+        self.branch_sizes = {}
 
 
 def padding_runs(obj, section, instructions):
@@ -112,7 +113,7 @@ def layout(obj, section, instructions, func_align=None, jcc_align=None, source=N
     for i in instructions:
         if id(i) in internal:
             form = i.j.get('form')
-            bsize[id(i)] = form['imm'] if form and form.get('imm') in (8, 32) else 8
+            bsize[id(i)] = form['imm'] if form and form.get('imm') in (8, 32) else i.j.get('branch_size', 8)
         elif i.reloc is not None and i.flow in ('ConditionalBranch', 'UnconditionalBranch', 'Call'):
             bsize[id(i)] = 32
     # new instructions marked 'before' belong to the original instruction after them: its
@@ -155,6 +156,11 @@ def layout(obj, section, instructions, func_align=None, jcc_align=None, source=N
             starts_function = (i.offset in func_starts and i.offset == i.home and id(i) not in leading) or id(i) in leads_function
             if starts_function and func_align:
                 pad = (int(os.environ.get('POST_FUNC_PHASE', phase)) - off) % (1 << func_align)
+                if pad:
+                    items.append(('pad', nops(pad)))
+                    off += pad
+            if i.j.get('align_before') and not starts_function:
+                pad = (-off) % (1 << i.j['align_before'])
                 if pad:
                     items.append(('pad', nops(pad)))
                     off += pad
@@ -212,6 +218,7 @@ def layout(obj, section, instructions, func_align=None, jcc_align=None, source=N
     # final pass: encode with the settled offsets
     out = Layout()
     out.offsets = offsets
+    out.branch_sizes = {i.offset: bsize[id(i)] for i in instructions if id(i) in bsize}
     data = bytearray()
     for kind, x in items:
         if kind == 'pad':

@@ -1,27 +1,35 @@
-"""Write a relocatable ELF64 object back: the code sections from their new
-layouts, every other section as it was, symbols with their new values and
-sizes, relocations regenerated for code and remapped for data. Also a GNU ar
-archive writer with a symbol index, so nothing but Python is needed."""
+"""Emit relocatable ELF64 objects and GNU ar archives from an object model.
+
+The compiler can build the model directly; the post pass can also read an
+existing object and supply replacement code layouts. Neither the object
+emitter nor the archive emitter needs to parse an input object."""
 import struct
 
 import elf
+from objfile import Object
 
 DROP = {'.eh_frame', '.llvm_addrsig', '.symtab', '.strtab', '.shstrtab'}
 
 
 def write_object(src_path, dst_path, layouts, remap, rename=None, new_sections=(), overrides=None):
+    """Compatibility entry for the post pass: src_path can also be an Object."""
+    obj = src_path if isinstance(src_path, Object) else Object(src_path)
+    return write_model(obj, dst_path, layouts, remap, rename, new_sections, overrides)
+
+
+def write_model(obj, dst_path, layouts=None, remap=None, rename=None, new_sections=(), overrides=None, defined=None):
     """layouts: {code section name: Layout}; remap(section, old offset) -> new offset;
     rename: {symbol name: new name} for the symbols defined here and the relocations against them;
     new_sections: [(name, Layout, symbol name)] code sections that did not exist in the source, each
     with one global function symbol at its start; overrides: {(section, offset): (symbol, addend)}
     for data relocations that now point elsewhere."""
+    layouts = layouts or {}
+    remap = remap or (lambda section, offset: offset)
     rename = rename or {}
     overrides = overrides or {}
-    e = elf.read(src_path)
-    old_index = {s.name: s.index for s in e.sections}
     kept = []   # old sections that stay, in order
-    for s in e.sections:
-        if s.index == 0 or s.type == 'SHT_RELA' or s.name in DROP or s.name.startswith('.rela'):
+    for s in obj.sections.values():
+        if s.type == 'SHT_RELA' or s.name in DROP or s.name.startswith('.rela'):
             continue
         kept.append(s)
     # new section list: null, kept..., .rela.X for each X with relocations, .symtab, .strtab, .shstrtab
@@ -36,7 +44,7 @@ def write_object(src_path, dst_path, layouts, remap, rename=None, new_sections=(
             contents.append(layouts[s.name].data)
         else:
             contents.append(s.data if s.type != 'SHT_NOBITS' else b'')
-        headers.append(dict(type=s, flags=s.flags, link=0, info=0, align=s.align, entsize=s.entsize, nobits=s.size if s.type == 'SHT_NOBITS' else None))
+        headers.append(dict(type=s, flags=s.flags, link=0, info=0, align=s.align, entsize=s.entsize, nobits=s.nobits_size if s.type == 'SHT_NOBITS' else None))
     for name, lay, symname in new_sections:
         new_index[name] = len(names)
         names.append(name)
@@ -48,9 +56,13 @@ def write_object(src_path, dst_path, layouts, remap, rename=None, new_sections=(
     sym_index = {}
     new_locals = [('', 0, 0, 'STT_SECTION', 'STB_LOCAL', new_index[name]) for name, lay, symname in new_sections]
     new_globals = [(symname, 0, len(lay.data), 'STT_FUNC', 'STB_GLOBAL', new_index[name]) for name, lay, symname in new_sections]
-    for n, sym in enumerate(e.symbols):
-        if 0 < sym.shndx < 0xff00:
-            secname = e.sections[sym.shndx].name
+    source_symbols = obj.symbols
+    if not source_symbols or source_symbols[0].name or source_symbols[0].section != 'UND':
+        from objfile import Symbol
+        source_symbols = [Symbol('', 0, 0, 'STT_NOTYPE', 'STB_LOCAL', 'UND'), *source_symbols]
+    for n, sym in enumerate(source_symbols):
+        if sym.section not in ('UND', 'ABS', 'COMMON'):
+            secname = sym.section
             if secname not in new_index:
                 continue
             shndx = new_index[secname]
@@ -60,16 +72,18 @@ def write_object(src_path, dst_path, layouts, remap, rename=None, new_sections=(
                 if sym.type == 'STT_FUNC' or size:
                     size = remap(secname, sym.value + sym.size) - value
         else:
-            shndx = sym.shndx
+            shndx = {'UND': 0, 'ABS': 0xfff1, 'COMMON': 0xfff2}[sym.section]
             value, size = sym.value, sym.size
         if sym.bind != 'STB_LOCAL' and new_locals:
             symbols += new_locals
             new_locals = []
         sym_index[n] = len(symbols)
-        symbols.append((rename.get(sym.name, sym.name), value, size, sym.type, sym.bind, shndx))
+        name = '' if sym.type == 'STT_SECTION' else rename.get(sym.name, sym.name)
+        symbols.append((name, value, size, sym.type, sym.bind, shndx))
     symbols += new_locals + new_globals
     # a pass may relocate against a symbol the object did not reference (the table behind a trampoline)
     needed = {symname for lay in layouts.values() for _, _, symname, is_section, _ in lay.relocs if not is_section}
+    needed |= {r.symbol for s in kept if s.name not in layouts for r in s.relocs if not r.symbol_is_section}
     needed |= {symname for symname, _ in overrides.values()}
     for name in sorted(needed - {name for name, *_ in symbols}):
         symbols.append((name, 0, 0, 'STT_NOTYPE', 'STB_GLOBAL', 0))
@@ -95,10 +109,9 @@ def write_object(src_path, dst_path, layouts, remap, rename=None, new_sections=(
             for off, type_, symname, is_section, addend in layouts[s.name].relocs:
                 entries.append((off, type_, symname if is_section else rename.get(symname, symname), is_section, addend))
         else:
-            for r in e.relocs.get(s.index, []):
-                sym = e.symbols[r.symbol]
-                is_section = sym.type == 'STT_SECTION'
-                symname = e.sections[sym.shndx].name if is_section else sym.name
+            for r in s.relocs:
+                is_section = r.symbol_is_section
+                symname = r.symbol
                 addend = r.addend
                 if is_section and symname in layouts:
                     addend = remap(symname, addend)
@@ -161,25 +174,31 @@ def write_object(src_path, dst_path, layouts, remap, rename=None, new_sections=(
         out += struct.pack('<IIQQQQIIQQ', name_pos[n], type_, h['flags'], 0, offsets[n] if n else 0, size, h['link'], h['info'], h['align'], h['entsize'])
     ident = b'\x7fELF' + bytes([2, 1, 1, 0]) + bytes(8)
     struct.pack_into('<16sHHIQQQIHHHHHH', out, 0, ident, 1, 62, 1, 0, 0, shoff, 0, 64, 0, 0, 64, len(headers), len(headers) - 1)
-    with open(dst_path, 'wb') as f:
-        f.write(out)
+    data = bytes(out)
+    if defined is not None:
+        defined.extend(name for name, _, _, _, bind, shndx in symbols if name and bind in ('STB_GLOBAL', 'STB_WEAK') and shndx != 0)
+    if dst_path is not None:
+        with open(dst_path, 'wb') as f:
+            f.write(data)
+    return data
 
 
-def write_archive(path, members):
-    """GNU ar with a symbol index. members: [(name, bytes)]; the defined global symbols come from each member's ELF."""
-    import tempfile, os
+def write_archive(path, members, defined=None):
+    """GNU ar with a symbol index. defined: {member name: [global symbol names]}.
+    With no symbol lists the legacy post pass reads them from its ELF members;
+    the compiler supplies them from the models it has just emitted."""
     symbols = []   # (name, member index)
     for n, (name, data) in enumerate(members):
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(data)
-            tmp = f.name
-        try:
-            e = elf.read(tmp)
-        finally:
-            os.unlink(tmp)
-        for sym in e.symbols:
-            if sym.bind in ('STB_GLOBAL', 'STB_WEAK') and sym.shndx != 0 and sym.name:
-                symbols.append((sym.name, n))
+        if defined is not None:
+            symbols.extend((symbol, n) for symbol in defined[name])
+        else:
+            import tempfile
+            with tempfile.TemporaryDirectory() as where:
+                from pathlib import Path
+                tmp = Path(where) / 'member.o'
+                tmp.write_bytes(data)
+                e = elf.read(tmp)
+            symbols.extend((s.name, n) for s in e.symbols if s.bind in ('STB_GLOBAL', 'STB_WEAK') and s.shndx != 0 and s.name)
     long_names = bytearray()
     member_names = []
     for name, _ in members:

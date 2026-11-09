@@ -401,7 +401,7 @@ def tail_chain(fn, tb):
     while True:
         chain.append(b)
         tail += [fn.ins[k] for k in range(b.start, b.end) if fn.ins[k].gas]
-        if len(tail) > TAIL_MAX:
+        if len(tail) > getattr(fn, 'tail_limit', TAIL_MAX):
             return None, None
         last = fn.ins[b.end - 1]
         if last.flow == 'Return' or (last.flow == 'UnconditionalBranch' and last.reloc is not None):
@@ -438,7 +438,9 @@ def duplicate_tails(fn):
             for k in range(b.start, b.end):
                 delete(fn.ins[k])
             for s in b.succ:
-                preds[id(s)].remove(b)
+                # A pending tail copy may already have removed this edge.
+                if b in preds[id(s)]:
+                    preds[id(s)].remove(b)
             done.append('%s: dropped unreachable block at %s' % (fn.name, label_of(fn.ins[b.start])))
     for k, clones in sorted(new_ins, reverse=True):
         fn.ins[k:k] = clones
@@ -1263,8 +1265,12 @@ def optimize(obj, ins, evex, section='.text', trampolines=None):
         passes = [p for p in passes if p in ('tail', 'hot', 'thread', 'lea', 'copy', 'tramp', 'frame', 'vzu')]
     functions = split_functions(obj, ins, section)
     for fn in functions:
+        fn.tail_limit = next((i.j['tail_limit'] for i in fn.ins if 'tail_limit' in i.j), TAIL_MAX)
+        skipped = next((i.j['post_skip_passes'] for i in fn.ins if 'post_skip_passes' in i.j), ())
         analyze(fn)
         for name in passes:
+            if name in skipped:
+                continue
             if name == 'fold':
                 report += fold_masked_compares(fn)
             elif name == 'tail':

@@ -5,10 +5,10 @@
 
 Permissively licensed string and memory functions for x86-64: `memcpy`,
 `memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strcat`, `strcmp`,
-`strspn`, `strcspn`. Written in C with the `immintrin.h` intrinsics,
-dispatched once by `cpuid` through one table of primitives, and then
-rewritten after the compiler by a small post-pass over the objects. Meant to
-be linked into a static libc in place of its string routines.
+`strspn`, `strcspn`. Written in a small C dialect with builtin SIMD
+operations, compiled by the project's Python compiler, and dispatched once
+by `cpuid` through one table of primitives. Meant to be linked into a
+static libc in place of its string routines.
 
 ## Model
 
@@ -42,15 +42,22 @@ only the Skylake-SP configuration names the `_jcc` twins.
   from `cpuid`; a constructor copies the host's configuration into
   `str_table`, and the public `str_memcpy` and friends jump through it. A
   libc build renames them: `-Dstr_memcpy=memcpy ...`.
-- `dev/` — the post pass, Python only: `x86.py` decodes x86-64 (legacy,
+- `dev/cc/`, `dev/strcc.py` — the library compiler, Python only: a C
+  preprocessor and parser, typed CFG/SSA, optimization recipes for the
+  concrete kernels, instruction selection and register allocation. SIMD
+  operations are builtins; system intrinsic headers are not parsed. The
+  compiler builds instruction and object models directly, without invoking
+  a C compiler, assembler or linker, parsing an input object or decoding
+  machine code.
+- `dev/` — shared machine optimization and emission: `x86.py` decodes x86-64 (legacy,
   VEX, EVEX) into structured instructions, `opt.py` rewrites them (tail and
   branch layout, mask-register and vector-register rewrites, calls through
   the table slots instead of the entry points), `encode.py` encodes them
   again from the same tables, `layout.py` lays the sections out (branch
   relaxation, alignment, relocations), `elf.py` and `elfout.py` read and
   write the objects and the archive, `post.py` drives it. No assembler, no
-  `ar`. The library is the post pass's output: a build without it does not
-  link.
+  `ar`. The native compiler uses the optimizer, encoder, layout and object
+  writer directly; `post.py` retains the external-compiler comparison path.
 - `tst/test.c` — the library against the host C library: all sizes and
   alignments, overlaps, guard pages, every pair of page offsets of two
   pointers and every offset of one, random sets, for every configuration the
@@ -66,19 +73,27 @@ only the Skylake-SP configuration names the `_jcc` twins.
 ## Build
 
 ```sh
-./build -j8 checks libstr      # .build/libstr.a, the test, the round-trip
-cat .build/post/report.txt     # what the post pass changed
+./build -j8 libstr             # .build/libstr.a; Python only
+./build -j8 checks             # compiler tests, C test driver, decoder round-trip
+cat .build/post/report.txt
 ```
 
-`CC` selects the compiler (clang or gcc); the objects are compiled
-`-fno-pic`, so the post pass sees plain relocations. The pass itself needs
-only Python 3.
+The library build needs Python 3 and ignores `CC`. `CC` selects clang or
+gcc for the test driver and external-compiler checks. For example,
+`CC=/no/compiler ./build -B .build-python libstr` builds the library without
+an external C compiler.
+
+`./build check_native_objects` explicitly builds the old compiler/post-pass
+pipeline in `.build/reference/` and compares all eleven objects byte for
+byte with the native build. Exact comparison requires the reference
+compiler version and flags. The compiler tests also verify that native
+compilation succeeds with external tools and object decoding disabled.
 
 ## Post pass
 
-The compiler cannot be asked for some things from C, so `dev/opt.py` does
-them on the objects, with a control-flow graph and register liveness per
-function:
+`dev/opt.py` rewrites selected machine instructions using a control-flow
+graph and register liveness per function. The native compiler and the
+external-compiler comparison build share these passes:
 
 - `rename` — def-use webs of vector registers that touch a `ymm` are moved
   to `ymm16-31` and `vzeroupper` is dropped: nothing dirties the upper halves

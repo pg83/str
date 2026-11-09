@@ -36,6 +36,7 @@ class Section:
     offset: int = 0
     nobits_size: int = 0
     relocs: list = field(default_factory=list)
+    entsize: int = 0
 
     @property
     def is_code(self):
@@ -68,14 +69,16 @@ class Ins:
 
 
 class Object:
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, path=None):
+        self.path = Path(path) if path is not None else None
         self.sections = {}
         self.symbols = []
+        if path is None:
+            return
         e = elf.read(self.path)
         for s in e.sections:
-            if s.type in ('SHT_PROGBITS', 'SHT_NOBITS', 'SHT_INIT_ARRAY', 'SHT_FINI_ARRAY') and s.name:
-                self.sections[s.name] = Section(s.name, s.type, s.flags, s.align, s.data, s.offset, s.size)
+            if s.type in ('SHT_PROGBITS', 'SHT_NOBITS', 'SHT_NOTE', 'SHT_INIT_ARRAY', 'SHT_FINI_ARRAY', 'SHT_X86_64_UNWIND') and s.name:
+                self.sections[s.name] = Section(s.name, s.type, s.flags, s.align, s.data, s.offset, s.size, entsize=s.entsize)
         for sym in e.symbols:
             sec = e.section_name(sym.shndx)
             name = sym.name or (sec if sym.type == 'STT_SECTION' else '')

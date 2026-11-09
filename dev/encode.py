@@ -352,7 +352,7 @@ def gpr8(plan, name):
 def imm_fits(value, spec, osz, signed_hint):
     """Returns the immediate size in bits for the spec, or None."""
     if spec == 'Ib':
-        return 8 if -128 <= value <= 255 else None
+        return 8 if -128 <= value <= (127 if signed_hint else 255) else None
     if spec == 'Iw':
         return 16 if -32768 <= value <= 65535 else None
     if spec == 'Id':
@@ -441,7 +441,7 @@ def try_encode(cand, j, rel, branch_size, hint):
     imm_bytes = bytearray()
     imm_pos = None
     for value, spec in plan.imms:
-        size = imm_fits(value, spec, plan.osz, None)
+        size = imm_fits(value, spec, plan.osz, 'imm8s' in cand.attrs)
         if size is None:
             raise NoMatch
         if use_hint and hint['imm'] and hint['imm'] != size and len(plan.imms) == 1 and plan.branch is None:
@@ -547,6 +547,8 @@ def try_encode(cand, j, rel, branch_size, hint):
         if cand.kind == 'vex':
             if use_hint and hint.get('L') is not None and not any(o['kind'] == 'Register' and vec(o['reg']) for o in ops):
                 L = hint['L']
+            if 'vlen=1' in cand.attrs:
+                L = 1
             if cand.map == 1 and W == 0 and X == 0 and B == 0 and not (use_hint and not hint.get('vex2', True)):
                 out += bytes([0xc5, ((R ^ 1) << 7) | ((~vvvv & 15) << 3) | (L << 2) | pp])
             else:
@@ -577,6 +579,12 @@ def try_encode(cand, j, rel, branch_size, hint):
 
 
 def encode(j, rel=None, branch_size=None):
+    b, fields, _ = encode_with_form(j, rel, branch_size)
+    return b, fields
+
+
+def encode_with_form(j, rel=None, branch_size=None):
+    """Also return the selected table form, for a compiler emitting fresh IR."""
     build_index()
     mnemonic = j['mnemonic']
     if j.get('cc'):
@@ -590,13 +598,18 @@ def encode(j, rel=None, branch_size=None):
         raise NoMatch('no encoding for ' + mnemonic)
     best = None
     for cand in cands:
+        # Rewrites retain the instruction's encoding family (and explicitly
+        # update it when converting a function to EVEX). A shorter compressed
+        # displacement cannot introduce AVX-512 into an SSE/AVX2 function.
+        if cand.kind == 'evex' and j.get('encoding') in ('Legacy', 'VEX'):
+            continue
         try:
             b, fields, hinted = try_encode(cand, j, rel, branch_size, j.get('form'))
         except NoMatch:
             continue
         key = (0 if hinted else 1, len(b))
         if best is None or key < best[0]:
-            best = (key, b, fields)
+            best = (key, b, fields, cand)
     if best is None:
         raise NoMatch('no form fits %s %s' % (mnemonic, [o.get('reg') or o.get('mem') or o.get('imm') or o.get('branch') for o in j['ops']]))
-    return best[1], best[2]
+    return best[1], best[2], best[3]

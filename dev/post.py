@@ -50,7 +50,7 @@ def optimize_all(path, obj, code, args, trampolines):
     return report
 
 
-def write(path, out, args, obj, code, clones, overrides, maps):
+def write(path, out, args, obj, code, clones, overrides, maps, exports):
     """Lay the object out again, with the configuration clones as new sections, and write it;
     for every unit but dispatch also the twin laid out with the JCC padding, its global functions
     renamed name_jcc (the implementations the Skylake-SP configuration names). Returns the paths.
@@ -65,7 +65,7 @@ def write(path, out, args, obj, code, clones, overrides, maps):
         new_sections.append((section, layouts[section], symname))
     remap = layout.resolve_relocs(obj, layouts)
     new = out / Path(path).name
-    elfout.write_object(path, new, layouts, remap, None, new_sections, overrides)
+    elfout.write_model(obj, new, layouts, remap, None, new_sections, overrides, defined=exports.setdefault(new.name, []))
     maps[new.name] = {name: {str(v): k for k, v in lay.offsets.items()} for name, lay in layouts.items()}
     out_paths = [new]
     if not args.roundtrip and unit_of(path) != 'dispatch':
@@ -76,7 +76,7 @@ def write(path, out, args, obj, code, clones, overrides, maps):
         twin_layouts = {name: layout.layout(obj, name, ins, args.func_align, jcc_align=True) for name, ins in code.items()}
         remap = layout.resolve_relocs(obj, twin_layouts)
         twin = out / ('jcc-' + Path(path).name)
-        elfout.write_object(path, twin, twin_layouts, remap, {name: name + '_jcc' for name in exported})
+        elfout.write_model(obj, twin, twin_layouts, remap, {name: name + '_jcc' for name in exported}, defined=exports.setdefault(twin.name, []))
         out_paths.append(twin)
     return out_paths
 
@@ -208,10 +208,10 @@ def main():
         for c in configs:
             n = sum(1 for cl in clones for section, *_ in cl if section.startswith('.text.%s.' % c.name))
             lines.append('%s: %d functions, %s' % (c.name, n, 'the JCC padding' if c.jcc else 'no padding'))
-    maps = {}
+    maps, exports = {}, {}
     for (path, obj, code), unit_clones in zip(decoded, clones):
         unit = unit_of(path)
-        paths = write(path, out, args, obj, code, unit_clones, overrides, maps)
+        paths = write(path, out, args, obj, code, unit_clones, overrides, maps, exports)
         objects += paths
         new = paths[0]
         lines += ['%s: %s' % (unit, line) for line in reports[path]]
@@ -224,7 +224,7 @@ def main():
                 a, b = describe(path)[0], describe(new)[0]
                 lines.append('%s: %d -> %d bytes of code' % (unit, sum(map(len, a.values())), sum(map(len, b.values()))))
     if args.archive:
-        elfout.write_archive(args.archive, [(o.name, o.read_bytes()) for o in objects])
+        elfout.write_archive(args.archive, [(o.name, o.read_bytes()) for o in objects], defined=exports)
     if args.layout_map:
         Path(args.layout_map).write_text(json.dumps(maps))
     text = '\n'.join(lines) + '\n'

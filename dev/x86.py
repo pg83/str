@@ -381,7 +381,7 @@ for op, m in {0x41: 'kand', 0x42: 'kandn', 0x45: 'kor', 0x46: 'kxnor', 0x47: 'kx
     for pfx, w, sfx in (('', 0, 'w'), ('', 1, 'q'), ('66', 0, 'b'), ('66', 1, 'd')):
         v(1, op, pfx, w, m + sfx, ['Kr', 'Kv', 'Km'], 'acc=W,R,R nosuffix', evex='no')
 for pfx, w, m in (('66', 0, 'kunpckbw'), ('', 0, 'kunpckwd'), ('', 1, 'kunpckdq')):  # the low halves of two masks into one
-    v(1, 0x4b, pfx, w, m, ['Kr', 'Kv', 'Km'], 'acc=W,R,R nosuffix', evex='no')
+    v(1, 0x4b, pfx, w, m, ['Kr', 'Kv', 'Km'], 'acc=W,R,R nosuffix vlen=1', evex='no')
 for op, m in {0x44: 'knot', 0x98: 'kortest', 0x99: 'ktest'}.items():
     for pfx, w, sfx in (('', 0, 'w'), ('', 1, 'q'), ('66', 0, 'b'), ('66', 1, 'd')):
         v(1, op, pfx, w, m + sfx, ['Kr', 'Km'], ('acc=W,R' if m == 'knot' else 'acc=R,R') + ' nosuffix', evex='no')

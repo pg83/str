@@ -1,8 +1,13 @@
 /.build*/
 /libstr
+/native_libstr
+/reference_libstr
 /post
 /test
 /checks
+/check_compiler
+/check_roundtrip
+/check_native_objects
 /roundtrip
 __pycache__/
 /.lab/

@@ -1132,12 +1132,30 @@ class BuildContext:
             program.nodes = [node for node in imported_nodes if node in program_closure]
             program.uses_cxx = True
 
-    def build_graph(self) -> None:
+    def build_graph(self, selected: Iterable[Target] | None = None) -> None:
         self._prepare_host_dependencies()
-        for target in self.targets:
+        targets = self.targets
+        if selected is not None:
+            closure: set[Target] = set()
+            todo = list(selected)
+            while todo:
+                target = todo.pop()
+                if target in closure:
+                    continue
+                closure.add(target)
+                todo.extend([*target.deps, *target.host_deps])
+            produced = {p for target in closure for p in target.outputs}
+            # A command-only build needs no C/C++ toolchain. Preserve the
+            # complete graph path for compiled targets and for implicit
+            # generated inputs whose producer is outside the declared deps.
+            if all(target.kind in ("command", "interface") for target in closure) and not any(
+                    p.startswith(B + "/") and p not in produced
+                    for target in closure for p in target.inputs):
+                targets = [target for target in self.targets if target in closure]
+        for target in targets:
             if target.kind == "command":
                 self._emit_target(target, set())
-        for target in self.targets:
+        for target in targets:
             if target.kind not in ("interface", "command"):
                 self._emit_target(target, set())
         scanner = IncludeScanner(self)
@@ -3387,8 +3405,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         context.load(build_file)
-        context.build_graph()
         if args.graph:
+            context.build_graph()
             print(context.serialize_graph())
             return 0
         if args.list:
@@ -3416,6 +3434,7 @@ def main(argv: list[str] | None = None) -> int:
             # holds real binaries, unlike test groups full of stamps.
             publish.extend(selected)
         selected = _uniq(selected)
+        context.build_graph(selected)
         roots = _uniq(target.root for target in selected if target.root is not None)
         dist = [host.strip() for spec in args.dist for host in spec.split(",") if host.strip()]
         if dist and args.strace:
