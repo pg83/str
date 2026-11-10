@@ -1253,7 +1253,9 @@ class ISel:
                 dst = Reg(self.define(op.result).r, 32)
                 self.emit('xor', dst, dst, acc='w r', kind='zero')
                 cc = self.condition(a)
-                self.emit('set', Reg(dst.r, 8), cc=cc, acc='w', kind='setcc')
+                # the low byte only, the zeros above it the xor's: a write that keeps the rest (the xor not dead,
+                # its register live across the compare: not the compared value's)
+                self.emit('set', Reg(dst.r, 8), cc=cc, acc='rw', kind='setcc')
                 return
             dst = Reg(self.define(op.result).r, 32)
             self.emit('movzb', dst, self.reg(a, 8), acc='w r')
