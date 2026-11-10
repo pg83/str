@@ -2,6 +2,7 @@
 """Line and branch coverage of the library's C by the test, with gcc and gcov.
 
     coverage.py [--out DIR] [--cc gcc] [--min 100] [--cppflags ...] [--ldflags ...]
+    ix run lib/c bin/gcc/15 bin/binutils -- python3 dev/coverage.py --ix   # here: ix's gcc, no libgcc
 
 The units are compiled with --coverage at -O1 (every source branch keeps
 its own counter; the post pass is not involved, it is checked by the normal
@@ -14,7 +15,10 @@ of the count (xgetbv behind the OSXSAVE check, the compiler's own branch in
 ctz for an argument that is never zero). The test exercises every configuration the host can run and
 the decisions for other hosts from cpuid snapshots, so one AVX-512 machine
 covers everything; a host without AVX-512 cannot run the EVEX code and
-reports less."""
+reports less. --gcov-runtime: for a gcc built without libgcc (ix's) the
+runtime --coverage links, dev/libgcov.c built as libgcov.a; --ix: that, with
+the flags of ix run's environment made gcc's (clang's own dropped, gcc's
+headers in)."""
 import argparse
 import json
 import os
@@ -38,14 +42,45 @@ def run(cmd, **kw):
     subprocess.run(cmd, check=True, **kw)
 
 
+def ix_flags(cc):
+    """ix run's CPPFLAGS and LDFLAGS for gcc: clang's own flags and headers out, gcc's headers in."""
+    drop = {'-fcolor-diagnostics', '-nostdinc++', '-nostdlib++'}
+    cpp, out = shlex.split(os.environ.get('CPPFLAGS', '')), []
+    i = 0
+    while i < len(cpp):
+        if cpp[i] == '-isystem' and i + 1 < len(cpp) and 'clang' in cpp[i + 1]:
+            i += 2
+            continue
+        if cpp[i] not in drop:
+            out.append(cpp[i])
+        i += 1
+    out += ['-isystem', subprocess.check_output([*cc, '-print-file-name=include'], text=True).strip()]
+    return out, [f for f in shlex.split(os.environ.get('LDFLAGS', '')) if f not in drop]
+
+
+def gcov_runtime(cc, cppflags, obj, ar):
+    """dev/libgcov.c as obj/libgcov.a, with the counter kinds of this gcc."""
+    major = int(subprocess.check_output([*cc, '-dumpversion'], text=True).split('.')[0])
+    kinds = {12: 8, 13: 8, 14: 9, 15: 10}.get(major)
+    if kinds is None:
+        sys.exit('--gcov-runtime: the counter kinds of gcc %d are not known (dev/libgcov.c)' % major)
+    run([*cc, *cppflags, '-O2', '-DGCOV_COUNTERS=%d' % kinds, '-c', str(HERE / 'libgcov.c'), '-o', str(obj / 'libgcov.o')])
+    (obj / 'libgcov.a').unlink(missing_ok=True)
+    run([ar, 'rcs', str(obj / 'libgcov.a'), str(obj / 'libgcov.o')])
+    return ['-L', str(obj)]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', default=str(ROOT / '.build/coverage'))
-    p.add_argument('--cc', default=os.environ.get('CC', 'gcc'))
+    p.add_argument('--cc', help='the compiler (default $CC, gcc; with --ix gcc: ix run sets CC to its clang)')
     p.add_argument('--gcov', default=os.environ.get('GCOV', 'gcov'))
     p.add_argument('--nm', default=os.environ.get('NM', 'nm'))
     p.add_argument('--glibc-shims', action='store_true', default=bool(os.environ.get('COVERAGE_GLIBC_SHIMS')),
                    help='the gcov runtime of a glibc toolchain linked against musl: define the glibc-only names it wants')
+    p.add_argument('--gcov-runtime', action='store_true', help='dev/libgcov.c as the libgcov.a the link takes (a gcc without libgcc)')
+    p.add_argument('--ix', action='store_true', help='under ix run: its flags made gcc\'s, and --gcov-runtime')
+    p.add_argument('--ar', default=os.environ.get('AR', 'ar'))
     p.add_argument('--cppflags', default=os.environ.get('COVERAGE_CPPFLAGS', ''))
     p.add_argument('--ldflags', default=os.environ.get('COVERAGE_LDFLAGS', ''))
     p.add_argument('--min', type=float, default=100.0, help='required percent of lines and of branches')
@@ -54,11 +89,16 @@ def main():
     out = Path(a.out).resolve()
     obj = out / 'obj'
     obj.mkdir(parents=True, exist_ok=True)
-    cc = shlex.split(a.cc)
+    cc = shlex.split(a.cc or ('gcc' if a.ix else os.environ.get('CC', 'gcc')))
     cppflags = shlex.split(a.cppflags)
     ldflags = shlex.split(a.ldflags)
+    if a.ix:
+        cpp, ld = ix_flags(cc)
+        cppflags, ldflags, a.gcov_runtime = cpp + cppflags, ld + ldflags, True
     objects = []
     if not a.no_run:
+        if a.gcov_runtime:
+            ldflags = ldflags + gcov_runtime(cc, cppflags, obj, a.ar)
         for unit, march in UNITS.items():
             o = obj / (unit + '.o')
             run([*cc, *cppflags, '-I', str(ROOT), *CFLAGS, *march, '-c', str(ROOT / (unit + '.c')), '-o', str(o)])

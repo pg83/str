@@ -304,7 +304,7 @@ static void suite(int full) {
 
             set[m] = 0;
 
-            for (size_t run = 0; run <= 600; run += (run < 70 ? 1 : 29)) {
+            for (size_t run = 0; run <= 4300; run += (run < 70 ? 1 : run < 600 ? 29 : 900)) { /* past pcmpistri's 2 KiB into the shuffle scan */
                 for (size_t off = 0; off < 48; off += 5) {
                     unsigned char *s = a + 4096 + off;
 
@@ -428,10 +428,17 @@ guards:;
                 unsigned char keep = s[at[i]];
                 s[at[i]] = 0x9a;
                 CHECK(T->memchr(s, 0x9a, n) == memchr(s, 0x9a, n));
+                CHECK(T->memchr(s, 0x9a, at[i]) == memchr(s, 0x9a, at[i])); /* the match right past n, maybe in the head block */
                 CHECK(sign(T->memcmp(s, d, n)) == sign(memcmp(s, d, n)));
                 s[at[i]] = 0; /* a string ending there */
                 CHECK(T->strlen((char *)s) == strlen((char *)s));
                 CHECK(sign(T->strcmp((char *)s, (char *)d)) == sign(strcmp((char *)s, (char *)d)));
+                /* copied and appended: the first block cut short by the page end, the NUL past it */
+                unsigned char *t = ref2 + 64, *u = ref2 + 4096;
+                CHECK(T->strcpy((char *)t, (char *)s) == (char *)t && !memcmp(t, s, strlen((char *)s) + 1));
+                u[0] = 'x';
+                u[1] = 0;
+                CHECK(T->strcat((char *)u, (char *)s) == (char *)u && u[0] == 'x' && !memcmp(u + 1, s, strlen((char *)s) + 1));
                 s[at[i]] = keep;
             }
         }
@@ -1002,6 +1009,8 @@ static void hosts(void) {
         {"zen 5", {7, AMD, 0xb20f40, V3_ECX1, V4_EBX7 | ERMS_EBX7, V3_ECX81, 0xe7, 0x30, 0x80000028, 0x597fffcf},
          STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS | STR_FSRS, "evex512r"},
         {"zen 5, extended leaves short of 0x80000021", {7, AMD, 0xb20f40, V3_ECX1, V4_EBX7 | ERMS_EBX7, V3_ECX81, 0xe7, 0x30, 0x80000020, 0x597fffcf},
+         STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS, "evex512"},
+        {"zen 4 with the extended leaves, no fast short rep stosb", {7, AMD, 0xa60f12, V3_ECX1, V4_EBX7 | ERMS_EBX7, V3_ECX81, 0xe7, 0, 0x80000028, 0x597ffbcf},
          STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS, "evex512"},
         {"sapphire rapids", {7, INTEL, 0x806f8, V3_ECX1, V4_EBX7 | ERMS_EBX7, V3_ECX81, 0xe7, 1u << 11, 0x80000008, 1u << 10},
          STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS | STR_FSRS, "evex512r"},

@@ -1,27 +1,17 @@
 /*
- * evex.c: first blocks with AVX-512 at 256 bits (AVX-512F/BW/CD/DQ/VL).
+ * evex.c: first blocks with AVX-512 at 256 bits (AVX-512F/BW/CD/DQ/VL):
+ * memchr, strcmp and its tail, strcpy and strcat, for every configuration
+ * with AVX-512 (the memory functions and strlen are evex512.c's: their
+ * 64-byte entries measured better on Skylake-SP too, dispatch.c).
  *
- * Compile with -march=x86-64-v4 -mprefer-vector-width=256. What changes
- * against AVX2 is the short path: memcpy/memmove/memset/memcmp of 16 bytes
- * and less take one masked 128-bit load/store/compare, with no size tree and
- * no page check, and no vzeroupper because only xmm registers are involved.
- * strlen and strcpy look at one 32-byte block first when the page allows (one
- * vzeroupper on exit), 16 bytes otherwise; strcmp starts with 16 bytes.
- * 17..64 bytes of the memory functions reuse the common short paths; longer
- * inputs go through the table to the kernels. 512-bit registers are never
- * used here: on Skylake-era Intel they lower the clock.
+ * Compile with -march=x86-64-v4 -mprefer-vector-width=256. strcpy looks at
+ * one 32-byte block first when the page allows (one vzeroupper on exit), 16
+ * bytes otherwise, and stores the string through its NUL masked; strcmp
+ * starts with 16 bytes. Longer inputs go through the table to the kernels.
+ * 512-bit registers are never used here: on Skylake-era Intel they lower
+ * the clock.
  */
 #include "common.h"
-
-/* Low n bits set; n <= 16. Masked-off bytes of a load are never touched, so a
-   masked load is safe wherever the n bytes themselves are. */
-static inline __mmask16 low_mask(size_t n) {
-    return (__mmask16)_bzhi_u32(0xffffffffu, (unsigned)n);
-}
-
-static inline __m128i mload16(const void *p, __mmask16 k) {
-    return _mm_maskz_loadu_epi8(k, p);
-}
 
 static inline void mstore16(void *p, __mmask16 k, __m128i v) {
     _mm_mask_storeu_epi8(p, k, v);
@@ -47,61 +37,6 @@ static inline __mmask32 low_mask32(size_t n) {
    string through its terminator, given the NUL compare mask. One blsmsk. */
 static inline unsigned through_first(unsigned m) {
     return m ^ (m - 1);
-}
-
-/* ------------------------------------------------------------ NUL scans */
-
-size_t strlen_evex(const char *str) {
-    const u8 *s = (const u8 *)str, *next = 0;
-    size_t left = page_left(s);
-
-    if (left >= 32) {
-        /* one 32-byte block covers most strings; the mask needs no shift */
-        unsigned m = _mm256_cmpeq_epi8_mask(load256(s), _mm256_setzero_si256());
-
-        if (m) {
-            return ctz(m);
-        }
-
-        /* three aligned blocks in line (strings of up to 128 bytes end here; the
-           tail's call cost 1.3-1.6x on them), the tail beyond */
-        const u8 *a = align_down(s + 32, 32);
-
-        for (int k = 0; k < 3; k++, a += 32) {
-            m = _mm256_cmpeq_epi8_mask(load256a(a), _mm256_setzero_si256());
-
-            if (m) {
-                return (size_t)(a - s) + ctz(m);
-            }
-        }
-
-        return str_strlen_tail(a, s);
-    }
-
-    if (left >= 16) {
-        unsigned m = _mm_cmpeq_epi8_mask(load16(s), _mm_setzero_si128());
-
-        if (m) {
-            return ctz(m);
-        }
-
-        const u8 *a = align_down(s + 16, 16);
-
-        for (int k = 0; k < 3; k++) {
-            m = zero_mask16(load16a(a));
-
-            if (m) {
-                return (size_t)(a - s) + ctz(m);
-            }
-
-            a += 16;
-        }
-
-        return str_strlen_tail(a, s);
-    }
-
-    size_t n = strlen_prefix64(s, &next);
-    return n != SIZE_MAX ? n : str_strlen_tail(next, s);
 }
 
 /* ---------------------------------------------------------------- memchr */
@@ -189,111 +124,7 @@ void *memchr_evex(const void *p, int c, size_t n) {
     return str_memchr_large(from, (u8)c, n - (size_t)(from - s));
 }
 
-/* ------------------------------------------------------------------ copy */
-
-/* masked: one masked load and store for n <= 16. memmove skips it: after a
-   partially overlapping store the masked load forwards worse than two plain
-   loads, and overlapping tiny moves follow such stores by nature. */
-static inline void *copy(void *dst, const void *src, size_t n, int masked) {
-    u8 *d = (u8 *)dst;
-    const u8 *s = (const u8 *)src;
-
-    if (masked && n <= 16) {
-        __mmask16 k = low_mask(n);
-        mstore16(d, k, mload16(s, k));
-    } else if (n <= 32) {
-        copy_small(d, s, n);
-    } else if (n <= 64) {
-        /* two 32-byte blocks from the ends, loads before stores (overlap-safe) */
-        __m256i x = load256(s), y = load256(s + n - 32);
-        store256(d, x);
-        store256(d + n - 32, y);
-    } else {
-        return str_copy_large(d, s, n);
-    }
-
-    return dst;
-}
-
-void *memcpy_evex(void *dst, const void *src, size_t n) {
-    return copy(dst, src, n, 1);
-}
-
-void *memmove_evex(void *dst, const void *src, size_t n) {
-    return copy(dst, src, n, 0);
-}
-
-/* ------------------------------------------------------------------ fill */
-
-/* n <= 32: one masked 32-byte store when it stays in its page (a masked
-   store into the next page is assisted by microcode on Intel), 16 bytes
-   masked or the short path otherwise; 33..64: two 32-byte stores, 65..128
-   four, in line. */
-void *memset_evex(void *dst, int c, size_t n) {
-    u8 *d = (u8 *)dst;
-
-    if (n <= 32) {
-        if (__builtin_expect(page_left(d) >= 32, 1)) {
-            _mm256_mask_storeu_epi8(d, low_mask32(n), _mm256_set1_epi8((char)c));
-        } else if (n <= 16) {
-            mstore16(d, low_mask(n), splat16(c));
-        } else {
-            fill_small(d, splat16(c), c, n);
-        }
-    } else if (n <= 128) {
-        __m256i v = _mm256_set1_epi8((char)c);
-        store256(d, v);
-        store256(d + n - 32, v);
-
-        if (n > 64) {
-            store256(d + 32, v);
-            store256(d + n - 64, v);
-        }
-    } else {
-        return str_fill_large(d, c, n);
-    }
-
-    return dst;
-}
-
 /* --------------------------------------------------------------- compare */
-
-int memcmp_evex(const void *pa, const void *pb, size_t n) {
-    const u8 *a = (const u8 *)pa, *b = (const u8 *)pb;
-
-    if (n <= 32) {
-        if (n == 0) {
-            return 0;
-        }
-
-        /* one masked 256-bit compare for everything up to 32 bytes, the answer
-           without a branch on it (memcmp_answer) */
-        __mmask32 k = low_mask32(n);
-        return memcmp_answer(a, b, _mm256_mask_cmpneq_epu8_mask(k, _mm256_maskz_loadu_epi8(k, a), _mm256_maskz_loadu_epi8(k, b)), n);
-    }
-
-    /* 33..128: all the blocks' masks, then one answer; the kernel beyond */
-    uint64_t lo = _mm256_cmpneq_epu8_mask(load256(a), load256(b));
-
-    if (n <= 64) {
-        lo |= (uint64_t)_mm256_cmpneq_epu8_mask(load256(a + n - 32), load256(b + n - 32)) << (n - 32);
-        return memcmp_answer(a, b, lo, n);
-    }
-
-    lo |= (uint64_t)_mm256_cmpneq_epu8_mask(load256(a + 32), load256(b + 32)) << 32;
-
-    if (n <= 128) {
-        uint64_t hi = _mm256_cmpneq_epu8_mask(load256(a + n - 64), load256(b + n - 64)) |
-                      (uint64_t)_mm256_cmpneq_epu8_mask(load256(a + n - 32), load256(b + n - 32)) << 32;
-        return memcmp_answer2(a, b, lo, hi, n);
-    }
-
-    if (lo) {
-        return byte_diff(a, b, (size_t)__builtin_ctzll(lo));
-    }
-
-    return str_memcmp_large(a, b, n);
-}
 
 /* 16 bytes first: at a few bytes a 32-byte block costs more than it saves. */
 int strcmp_evex(const char *left, const char *right) {

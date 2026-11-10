@@ -206,11 +206,6 @@ int strcmp_tail_avx2(const u8 *a, const u8 *b);
 void *strcpy_long_avx2(u8 *d, const u8 *s, const u8 *a);
 void *copy_huge_avx2(u8 *d, const u8 *s, size_t n);           /* the loop below 32 KiB, rep movsb beyond */
 /* evex.c: AVX-512 with 256-bit registers */
-void *memcpy_evex(void *, const void *, size_t);
-void *memmove_evex(void *, const void *, size_t);
-void *memset_evex(void *, int, size_t);
-int memcmp_evex(const void *, const void *, size_t);
-size_t strlen_evex(const char *);
 char *strcpy_evex(char *, const char *);
 char *strcat_evex(char *, const char *);
 int strcmp_evex(const char *, const char *);
@@ -235,11 +230,6 @@ void *memmove_evex512_jcc(void *, const void *, size_t);
 void *memset_evex512_jcc(void *, int, size_t);
 int memcmp_evex512_jcc(const void *, const void *, size_t);
 size_t strlen_evex512_jcc(const char *);
-void *memcpy_evex_jcc(void *, const void *, size_t);
-void *memmove_evex_jcc(void *, const void *, size_t);
-void *memset_evex_jcc(void *, int, size_t);
-int memcmp_evex_jcc(const void *, const void *, size_t);
-size_t strlen_evex_jcc(const char *);
 char *strcpy_evex_jcc(char *, const char *);
 char *strcat_evex_jcc(char *, const char *);
 int strcmp_evex_jcc(const char *, const char *);
@@ -462,13 +452,10 @@ static inline void fill_33_64(u8 *d, __m128i v, size_t n) {
 
 /* --------------------------------------------------------- short compare */
 
-/* n <= 16. A 16-byte load is taken only when both pointers have room in
-   their pages; bit 16 bounds the search without a variable shift. */
+/* 1 <= n <= 16 (the callers settle 0 before). A 16-byte load is taken only
+   when both pointers have room in their pages; bit 16 bounds the search
+   without a variable shift. */
 static inline int memcmp_le16(const u8 *a, const u8 *b, size_t n) {
-    if (n == 0) {
-        return 0;
-    }
-
     if (both_in_page(a, b, 16)) {
         return memcmp_answer(a, b, ne_mask16(load16(a), load16(b)), n);
     }

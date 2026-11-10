@@ -86,6 +86,13 @@ static inline unsigned cspn_index(__m128i set, __m128i text) {
     return i;
 }
 
+/* cspn_index of a block known to hold a stop (pcmpistri's CF or ZF): a byte
+   of the set, else the NUL. */
+static inline unsigned cspn_stop(__m128i set, __m128i text) {
+    unsigned i = (unsigned)_mm_cmpistri(set, text, CSPN_MODE);
+    return i < 16 ? i : ctz(zero_mask16(text));
+}
+
 /* ---- sets of 17..32 bytes: two pcmpistrm per text block, the bit masks combined */
 
 #define SPN_MASK_MODE (SPN_MODE | _SIDD_BIT_MASK)

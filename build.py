@@ -97,7 +97,7 @@ group("checks", *checks)
 # Line and branch coverage of the C by the test: gcc, gcov, no post pass (see dev/coverage.py).
 coverage = command(
     name="coverage",
-    inputs=[*build.glob("$(S)/*.c"), *build.glob("$(S)/*.h"), "$(S)/tst/test.c", "$(S)/dev/coverage.py", "$(S)/dev/units.py"],
+    inputs=[*build.glob("$(S)/*.c"), *build.glob("$(S)/*.h"), "$(S)/tst/test.c", "$(S)/dev/coverage.py", "$(S)/dev/units.py", "$(S)/dev/libgcov.c"],
     outputs=["$(B)/coverage/summary.txt", "$(B)/coverage/uncovered.txt"],
     cmd=["python3", "$(S)/dev/coverage.py", "--out", "$(B)/coverage"],
     descr="CV",

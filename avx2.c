@@ -166,7 +166,7 @@ ALWAYS_INLINE size_t set_scan(const char *str, const char *setstr, int members, 
                strcspn, the NUL (ZF) */
 
             if (members ? !_mm_cmpistra(set1, x, CSPN_MODE) : _mm_cmpistrc(set1, x, SPN_MODE)) {
-                return (size_t)(from - s) + (members ? cspn_index(set1, x) : (unsigned)_mm_cmpistri(set1, x, SPN_MODE));
+                return (size_t)(from - s) + (members ? cspn_stop(set1, x) : (unsigned)_mm_cmpistri(set1, x, SPN_MODE));
             }
         }
 
