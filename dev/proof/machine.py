@@ -656,6 +656,89 @@ def consecutive(lanes):
     return arr, off
 
 
+def shuffle_index(x):
+    """A pshufb index lane as (guard, k): the lane is 0 where guard, else the
+    half's byte k. The page-safe load's index a | (a > 15 ? 0xff : 0)
+    (pcmpgtb and por: the lanes past the block's end made negative) is 0
+    exactly where a is not in [0, 15] (a negative a has the top bit, one
+    past 15 the mask's): guard a > 15 unsigned, k = a itself there."""
+    if x.op == 'or':
+        for a, m in (x.args, x.args[::-1]):
+            if m.op == 'ite' and m.args[1] is const(8, 0xff) and m.args[2] is const(8, 0) and m.args[0].op == 'slt' and \
+                    m.args[0].args[0] is const(8, 15) and m.args[0].args[1] is a:
+                return S.ult(const(8, 15), a), a
+    return S.msb(x), S.band(x, const(8, 15))
+
+
+def low_of(t):
+    """(p, j): t is p's low j bits, zero above (p & 15 through the 32-bit
+    and of its low half and an extract to a byte), else None."""
+    if t.op == 'and' and S.is_const(t.args[1]):
+        m = t.args[1].val
+        j = m.bit_length()
+        if j and m == S.mask(j):
+            y = t.args[0]
+            while y.op == 'extract' and y.args[2] == 0 and y.args[1] + 1 >= j:
+                y = y.args[0]
+            return y, j
+    if t.op == 'extract' and t.args[2] == 0:
+        r = low_of(t.args[0])
+        if r is not None and r[1] <= t.w:
+            return r
+    return None
+
+
+def index64(k):
+    """zext(k) to 64 bits for a shuffle's byte index k in [0, 15]: a pointer's
+    low bits plus a constant (the page-safe load's iota + (p & 15)) as
+    (p & 15) + the constant, both below 16, so no carry; the block's
+    address plus it then folds to p plus the constant (merge_masks)."""
+    f, c = S.linear(k)
+    if len(f) == 1:
+        (x, v), = f.items()
+        r = low_of(x)
+        if v == 1 and r is not None and r[1] <= 4 and c + S.mask(r[1]) <= S.mask(k.w):
+            p, n = r
+            p64 = p if p.w == 64 else S.zext(p, 64) if p.w < 64 else S.extract(p, 63, 0)
+            return S.add(S.band(p64, const(64, S.mask(n))), const(64, c))
+    return S.zext(k, 64)
+
+
+def merge_masks(t):
+    """A sum with p & m1 and p & m2 at the same coefficient, m1 and m2
+    disjoint, as one p & (m1 | m2), p itself when that is all of p's bits:
+    an aligned block's address plus the pointer's low bits is the pointer."""
+    f, c = S.linear(t)
+    groups = {}
+    for x, v in f.items():
+        if x.op == 'and' and S.is_const(x.args[1]):
+            groups.setdefault((x.args[0].id, v), []).append(x)
+    f, changed = dict(f), False
+    for (_, v), xs in groups.items():
+        masks = [x.args[1].val for x in xs]
+        if len(xs) < 2 or any(masks[i] & masks[j] for i in range(len(xs)) for j in range(i)):
+            continue
+        union = 0
+        for m in masks:
+            union |= m
+        p = xs[0].args[0]
+        for x in xs:
+            del f[x]
+        y = p if union == S.mask(t.w) else S.band(p, const(t.w, union))
+        f[y] = (f.get(y, 0) + v) & S.mask(t.w)
+        if not f[y]:
+            del f[y]
+        changed = True
+    return S.from_linear(t.w, f, c) if changed else t
+
+
+def zero_or(t):
+    """(g, y) for a lane ite(g, 0, y) (a shuffle's lane past its block), else (FALSE, t)."""
+    if t.op == 'ite' and t.args[1] is const(t.w, 0):
+        return t.args[0], t.args[2]
+    return S.FALSE, t
+
+
 def lane_conds(st, j, n):
     """A masked instruction's lane conditions, or None unmasked."""
     k = j.get('op_mask')
@@ -1257,15 +1340,15 @@ class Machine:
         out = []
         for i, x in enumerate(idx):
             half = a[i // 16 * 16:i // 16 * 16 + 16]
-            k = S.band(x, const(8, 15))
+            zero, k = shuffle_index(x)
             run = None if S.is_const(k) else consecutive(half)
             if run is not None:  # the half one array's 16 bytes in a row (a block loaded): the lane its byte at k
-                v = S.select(run[0], S.add(run[1], S.zext(k, 64)))
+                v = S.select(run[0], merge_masks(S.add(run[1], index64(k))))
             else:
                 v = half[15]
                 for c in range(14, -1, -1):
                     v = S.ite(S.eq(k, const(8, c)), half[c], v)
-            out.append(S.ite(S.msb(x), const(8, 0), v))
+            out.append(S.ite(zero, const(8, 0), v))
         write_vec(st, ops[0]['reg'], out, legacy)
 
     i_vpshufb = i_pshufb
@@ -1335,8 +1418,12 @@ class Machine:
         b = vec_operand(self, st, j, ops[1], 16)  # no alignment needed
         nul_before = lambda xs, i: S.or_(*[S.is_zero(x) for x in xs[:i]])  # noqa: E731
         va = [S.not_(nul_before(a, i + 1)) for i in range(16)]  # byte i before the first NUL
-        vb = [S.not_(nul_before(b, i + 1)) for i in range(16)]
-        r1 = [S.and_(vb[i], S.or_(*[S.and_(va[k], S.eq(a[k], b[i])) for k in range(16)])) for i in range(16)]
+        # a text lane ite(g, 0, y) (the page-safe load's lanes past its block): NUL where g, else y's
+        # tests, so that "y is a valid byte of the set" is a term of y alone (the lane lemma's)
+        gb = [zero_or(x) for x in b]
+        zb = [S.or_(g, S.is_zero(y)) for g, y in gb]
+        vb = [S.not_(S.or_(*zb[:i + 1])) for i in range(16)]
+        r1 = [S.and_(vb[i], S.not_(g), S.or_(*[S.and_(va[k], S.eq(a[k], y)) for k in range(16)])) for i, (g, y) in enumerate(gb)]
         pol = imm >> 4 & 3
         r2 = [S.not_(x) for x in r1] if pol == 1 else [S.ite(vb[i], S.not_(r1[i]), r1[i]) for i in range(16)] if pol == 3 else r1
         st.flags = {'CF': S.or_(*r2), 'ZF': S.not_(vb[15]), 'SF': S.not_(va[15]), 'OF': r2[0], 'PF': S.FALSE}

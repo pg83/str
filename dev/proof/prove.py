@@ -24,9 +24,11 @@ Two modes for the loops:
              kept (the step). The lengths are then unbounded.
 """
 import argparse
+import itertools
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -151,6 +153,24 @@ SPANS = (16, 32, 64, 128, 256, 512, 1024)
 AUX = 20  # seconds for a query that only picks a cheaper form of an obligation (unknown: the plain form)
 
 
+CHUNK = 32  # a long disjunction in an obligation goes to the solver in parts of this many disjuncts
+
+
+def chunked(part):
+    """A part (conditions that must be unsat together) whose disjunction is
+    long, as parts of CHUNK disjuncts each: all unsat exactly when it is.
+    The solver does them far faster apart (strcspn avx2's exit past an
+    unrolled loop, 128 offsets: 268 s whole, 48 in four parts)."""
+    for i, c in enumerate(part):
+        if c.op == 'or_b' and len(c.args) > 3 * CHUNK // 2:
+            rest = part[:i] + part[i + 1:]
+            # each part an or_b of its own disjuncts as they are (or_ would flatten one that is a disjunction
+            # itself, strcspn's member(b), out of the term the abstraction replaces)
+            return [rest + [c.args[j] if j + 1 == len(c.args) else S._mk('or_b', S.BOOL, tuple(c.args[j:j + CHUNK]))]
+                    for j in range(0, len(c.args), CHUNK)]
+    return [part]
+
+
 class Alt:
     """An obligation written in several equivalent ways: alternatives, each
     a list of parts (queries) that must all be unsat; the prover tries them
@@ -164,7 +184,23 @@ class Alt:
         return Alt([[list(prefix) + part for part in alt] for alt in self.alts])
 
 
-def span(spec, st, lo, hi, pred, given=(), down=False, anchor=None, by_loads=True):
+def split_length(spec, st, n, given=()):
+    """(c, r, b): n = c + r with c a constant (the whole blocks an unrolled
+    loop's exit passed: 16 k) and r a rest the path keeps below b (an index
+    in the block it stopped in), else None."""
+    if st is None or S.is_const(n):
+        return None
+    f, c = S.linear(n)
+    if not f or not 0 < c <= 4096:
+        return None
+    r = S.from_linear(n.w, f, 0)
+    for b in SPANS[:3]:
+        if spec.solver.check(*st.pc, *given, S.ule(const(64, b), r), timeout=AUX) == 'unsat':  # r < b: the forms over [0, b) cover it
+            return c, r, b
+    return None
+
+
+def span(spec, st, lo, hi, pred, given=(), down=False, anchor=None, by_loads=True, cut=True):
     """pred at an offset in [lo, hi), as conditions for a query: the offsets
     one by one when the span is a known number, or when the path bounds it
     (a span up to an index from a mask's trailing zeros: offsets past lo by
@@ -176,6 +212,15 @@ def span(spec, st, lo, hi, pred, given=(), down=False, anchor=None, by_loads=Tru
     n = S.sub(hi, lo)
     if S.is_const(n) and n.val <= 4096:
         return [S.or_(*[pred(S.add(lo, const(64, j))) for j in range(n.val)])]
+    # an unrolled loop's exit: the c bytes of the blocks it passed with no bound to compare (they are all in
+    # the span), then the rest r in the block it stopped in: the same offsets, fewer of them against a term
+    cut = split_length(spec, st, n, given) if by_loads and cut else None
+    if cut is not None:
+        c, r, b = cut
+        whole = S.or_(*[pred(S.add(lo, const(64, j))) for j in range(c)],
+                      *[S.and_(S.ult(const(64, j), r), pred(S.add(lo, const(64, c + j)))) for j in range(b)])
+        rest = span(spec, st, lo, hi, pred, given, down, anchor, by_loads, cut=False)
+        return Alt([[[whole]]] + (rest.alts if isinstance(rest, Alt) else [[rest]]))
     way = loaded(spec, st, lo, hi, pred) if st is not None and by_loads else None
     if way is not None:
         rest = span(spec, st, lo, hi, pred, given, down, anchor, False)
@@ -247,6 +292,10 @@ def pinned(spec, st, idx, pred, ends, given=()):
         return [direct]
     forms = []
     for lo, hi in ends:
+        cut = split_length(spec, st, S.sub(idx, lo), given) if lo is not None else None
+        if cut is not None:  # lo + c + r, r in the block the scan stopped in
+            c, r, b = cut
+            forms.append(S.or_(*[S.and_(S.eq(r, const(64, j)), pred(S.add(lo, const(64, c + j)))) for j in range(b)]))
         for b in SPANS[:4]:
             if lo is not None and spec.solver.check(*st.pc, *given, S.ule(const(64, b), S.sub(idx, lo)), timeout=AUX) == 'unsat':
                 forms.append(S.or_(*[S.and_(S.eq(idx, S.add(lo, const(64, j))), pred(S.add(lo, const(64, j)))) for j in range(b)]))
@@ -1473,6 +1522,7 @@ class Span(Scan):
     bounded = False
     spn = True
     lane_terms = True
+    setmax = SETMAX  # the short spec's longest set, the long spec's shortest less one (--setmax: sse2's table scan from 2 bytes)
 
     def __init__(self, maxlen, induct):
         Scan.__init__(self, maxlen, induct)
@@ -1487,8 +1537,8 @@ class Span(Scan):
         s, t, z, L = self.s, self.t, self.z, self.L
         top = const(64, USER_HI)
         assume = [S.ule(const(64, USER_LO), s), S.ult(s, top), S.ule(const(64, USER_LO), t), S.ult(t, top),
-                  S.ule(L, const(64, SETMAX)), S.is_zero(self.tbyte(L)), S.ule(S.add(t, L), top)]
-        assume += [S.or_(S.ule(L, const(64, m)), S.not_(S.is_zero(self.tbyte(const(64, m))))) for m in range(SETMAX)]  # L the first NUL
+                  S.ule(L, const(64, self.setmax)), S.is_zero(self.tbyte(L)), S.ule(S.add(t, L), top)]
+        assume += [S.or_(S.ule(L, const(64, m)), S.not_(S.is_zero(self.tbyte(const(64, m))))) for m in range(self.setmax)]  # L the first NUL
         assume += [self.at(z), S.ult(z, const(64, USER_HI - USER_LO)), S.ule(S.add(s, z), top)]
         if not self.induct:
             assume.append(S.ule(z, const(64, self.maxlen)))
@@ -1577,8 +1627,11 @@ class Span(Scan):
         if not self.lane_terms:  # SpanLong's member is its mask M's
             return []
         if not hasattr(self, 'lanes'):
-            self.lanes = {'one': {}, 'cands': {}, 'node': {}, 'lemma': {}, 'f': {}, 'x': var('lane_x', 8)}
+            self.lanes = {'one': {}, 'cands': {}, 'node': {}, 'lemma': {}, 'f': {}, 'parts': {}, 'x': var('lane_x', 8)}
         L = self.lanes
+        if 'scope' not in L:  # what a membership test may read besides the byte: the set (its bytes, its length, the lanes past its NUL)
+            L['scope'] = frozenset().union(*[S.variables(m) for m in self.lane_forms(L['x'])]) - S.variables(L['x']) | {'L', 'set_hi'}
+        in_scope = lambda names: all(v in L['scope'] or v.startswith('canon') for v in names)  # noqa: E731
         found = set()
         for c in st.pc:
             got = L['cands'].get(c.id)
@@ -1587,22 +1640,25 @@ class Span(Scan):
             found |= got
         if not found:
             return []
-        setpc = []  # the path's conditions on the set (a table built under them): when what holds for every path does not
+        setpc = []  # the path's conditions on the set alone (a table built under them): when what holds for every path does not
 
         def sign_of(f):
+            # a term that reads anything but the byte and the set (a lane of a block shuffled by s & 15)
+            # says nothing of the byte alone: no lemma, no query
             sign = L['lemma'].get(f.id)
             if sign is None:
-                sign = L['lemma'][f.id] = self.lane_lemma(prover, f, [])
+                sign = L['lemma'][f.id] = self.lane_lemma(prover, f, []) if in_scope(S.variables(f) - S.variables(L['x'])) else -1
             if sign == 0:
                 if not setpc:
-                    setpc.extend(c for c in st.pc if 's_mem' not in S.variables(c))
-                key = (f.id,) + tuple(c.id for c in setpc)
+                    setpc.extend(c for c in st.pc if in_scope(S.variables(c)))
+                key = ('given', f.id, frozenset(c.id for c in setpc))  # the same few for every path the set's loading takes one way
                 sign = L['lemma'].get(key)
                 if sign is None:
                     sign = L['lemma'][key] = self.lane_lemma(prover, f, setpc)
-            return sign
+            return max(sign, 0)
 
         out, per_byte = [], {}
+        subst = L['last_subst'] = {}  # node -> the abstraction of what its lemma says (the facts' own terms, for abstract_of)
         for n in found:
             node, b = L['node'][n], L['node'][L['one'][n]]
             f = L['f'].get(n)
@@ -1615,14 +1671,40 @@ class Span(Scan):
             for f, node in terms:
                 sign = sign_of(f)
                 if sign:
-                    out.append(S.eq(self.lane_bool(node), self.lane_forms(b)[sign - 1]))
+                    form = self.lane_forms(b)[sign - 1]
+                    out.append(S.eq(self.lane_bool(node), form))
                     done = True
+                    ab = self.abstraction.get(self.member(b).id) if sign <= 2 else None
+                    if ab is not None:
+                        subst[node.id] = (ab if sign == 1 else S.not_(ab)) if node.w == S.BOOL else S.ite(ab if sign == 1 else S.not_(ab), const(1, 1), const(1, 0))
             if not done and len(terms) > 1:  # a set in parts, each tested on its own (pcmpistrm on its two halves of 16)
-                f = S.or_(*[self.lane_bool(f) for f, _ in terms])
-                sign = sign_of(f)
-                if sign:
-                    c = S.or_(*[self.lane_bool(node) for _, node in terms])
-                    out.append(S.eq(c, self.lane_forms(b)[sign - 1]))
+                # the outermost terms alone: one inside another (a lane's compare with one set byte, under the
+                # test of the half) is not a part of its own
+                key = tuple(node.id for _, node in terms)
+                parts = L['parts'].get(key)
+                if parts is None:
+                    inner = set()
+                    for f, node in terms:
+                        stack = [node]
+                        while stack:
+                            t = stack.pop()
+                            for y in t.args:
+                                if isinstance(y, S.T) and y.id not in inner:
+                                    inner.add(y.id)
+                                    stack.append(y)
+                    parts = L['parts'][key] = [(f, node) for f, node in terms if node.id not in inner]
+                # the halves: a pair of them first (the byte's NUL test is a part too, of no half)
+                for size in range(2, len(parts) + 1):
+                    for group in itertools.combinations(parts, size):
+                        f = S.or_(*[self.lane_bool(f) for f, _ in group])
+                        sign = sign_of(f)
+                        if sign:
+                            c = S.or_(*[self.lane_bool(node) for _, node in group])
+                            out.append(S.eq(c, self.lane_forms(b)[sign - 1]))
+                            break
+                    else:
+                        continue
+                    break
         return out
 
     @staticmethod
@@ -1671,6 +1753,8 @@ class Span(Scan):
                 continue
             if t.op == 'select' and t.args[0] is self.S:
                 b = t.id
+            elif t.op == 'var' and not (t.args[0] in L['scope'] or t.args[0].startswith('canon')):
+                b = -1  # a variable no membership test reads (a shuffled lane's guard of s_hi): the test is below it
             else:
                 bs = {one[y.id] for y in t.args if isinstance(y, S.T)} - {None}
                 b = -1 if -1 in bs or len(bs) > 1 else next(iter(bs)) if bs else None
@@ -1681,15 +1765,19 @@ class Span(Scan):
         """b one of the set's bytes before its NUL: written as the machine's
         pcmpistri writes it (a set byte valid when no NUL is at or before
         it), so that the path's terms and the spec's are the same terms."""
-        tb = [self.tbyte(const(64, k)) for k in range(SETMAX)]
-        m = S.or_(*[S.and_(S.not_(S.or_(*[S.is_zero(x) for x in tb[:k + 1]])), S.eq(tb[k], b)) for k in range(SETMAX)])
+        tb = [self.tbyte(const(64, k)) for k in range(self.setmax)]
+        m = S.or_(*[S.and_(S.not_(S.or_(*[S.is_zero(x) for x in tb[:k + 1]])), S.eq(tb[k], b)) for k in range(self.setmax)])
         if self.lane_terms and m.id not in self.abstraction:  # what an obligation is first asked with in its place
             self.abstraction[m.id] = S.not_(S.is_zero(S.select(S.mem_var('member_of'), S.zext(b, 64))))
         return m
 
     def at(self, off):
         b = S.select(self.S, S.add(S.sub(self.s, self.base), off))
-        return S.not_(self.member(b)) if self.spn else S.or_(self.member(b), S.is_zero(b))
+        if self.spn:
+            return S.not_(self.member(b))
+        # member(b) kept a term of its own (or_ would flatten its disjuncts into this one): the abstraction
+        # replaces it by the uninterpreted predicate, as it does strspn's not member(b)
+        return S._mk('or_b', S.BOOL, (self.member(b), S.is_zero(b)))
 
     def owner(self, addr):
         return owner(addr, ((self.s, self.base), (self.t, self.tbase)))
@@ -1766,10 +1854,10 @@ class SpanLong(Span):
         params, assume = Span.setup(self, a, align)
         L, t, top = self.L, self.t, const(64, USER_HI)
         qk, qm = var('qk0', 64), var('qm', 8)
-        assume = [c for c in assume if c is not S.ule(L, const(64, SETMAX))]  # the short form's bound (its first bytes' facts stay: instances)
-        assume += [S.ult(const(64, SETMAX), L), S.ult(L, const(64, USER_HI - USER_LO)),
+        assume = [c for c in assume if c is not S.ule(L, const(64, self.setmax))]  # the short form's bound (its first bytes' facts stay: instances)
+        assume += [S.ult(const(64, self.setmax), L), S.ult(L, const(64, USER_HI - USER_LO)),
                    S.forall_(qk, S.or_(S.ule(L, qk), S.not_(S.is_zero(self.tbyte(qk))))),  # no NUL before L
-                   *[S.or_(S.ule(L, const(64, m)), S.not_(S.is_zero(self.tbyte(const(64, m))))) for m in range(SETMAX, 2 * SETMAX)],  # instances
+                   *[S.or_(S.ule(L, const(64, m)), S.not_(S.is_zero(self.tbyte(const(64, m))))) for m in range(self.setmax, 2 * self.setmax)],  # instances
                    S.forall_(qm, S.eq(self.member(qm), self.in_first(qm, L)))]  # M's definition
         self.side_base = self.tbase
         self.table_forms, self.table_v = {}, {}
@@ -2112,7 +2200,7 @@ def moved_by(v, d, step, k):
 def result(args, a, what, paths, obligations, queries, seconds, detail):
     """One line per alignment class for dev/proof/run.py."""
     print('RESULT ' + json.dumps({'func': args.func, 'spec': args.spec, 'max': 'induct' if args.induct else args.max, 'classes': args.classes,
-                                  'align': a, 'prefix': getattr(args, 'prefix', '') or '', 'result': what,
+                                  'align': a, 'prefix': getattr(args, 'prefix', '') or '', 'setmax': getattr(args, 'setmax', SETMAX), 'result': what,
                                   'paths': paths, 'obligations': obligations, 'queries': queries, 'seconds': round(seconds, 1),
                                   'detail': detail}), flush=True)
 
@@ -2239,6 +2327,7 @@ class Prover:
         self.best_way = {}  # an obligation written several ways -> the one that proved it last
         self.best_stop = {}  # (an access, its ways) -> the way no_stop_below proved it by last
         self.covered = {}  # id -> a first arrival at a loop's head whose general state's subtree is explored
+        self.few = {}  # (rip, a shift count's term) -> its few values on the path, or None
         self.prefix = getattr(args, 'prefix', '') or ''  # the first two-way branches' ways this run takes (a split of one proof)
         self.backs = set()
         self.t0 = time.time()
@@ -2261,6 +2350,94 @@ class Prover:
         result(self.args, self.a, 'fail', self.paths, self.proved, self.solver.queries, time.time() - self.t0, detail)
         sys.exit(1)
 
+    SHIFTS = ('shrx', 'shlx', 'sarx', 'shr', 'shl', 'sar')
+
+    def shift_cases(self, st, most=4, span_most=32):
+        """A variable shift whose count register takes at most `most` values on
+        the path (outside a loop's general state): the path once per value,
+        that value its condition and the register's: a case split, every way
+        the count can be. strlen_tail evex512's first block, its NUL mask
+        shifted by a & 63 (0, 16, 32 or 48: a 16-aligned): each bit then the
+        byte at a constant offset from a, not one of 64 a symbolic shift may
+        bring (a query of more than 200 s each way)."""
+        j = self.mach.image.decode(st.rip)
+        mn = j['mnemonic']
+        if mn not in self.SHIFTS:
+            return None
+        cnt = j['ops'][2] if mn.endswith('x') else j['ops'][1] if len(j['ops']) > 1 else None
+        if cnt is None or cnt['kind'] != 'Register' or cnt['reg'] not in X.GPR:
+            return None
+        full = X.GPR[cnt['reg']][0]
+        t = st.gpr[full]
+        if S.is_const(t):
+            return None
+        key = (st.rip, t.id)
+        if key not in self.few:
+            # the values one by one when there are few; else an interval the path bounds the count to
+            # (memchr_large's last block, its mask shifted by 32 - (end - a): 1 to 31), every value in it
+            # a way (one the path rules out is a way with no input: its checks hold)
+            # (a loop's general state only: before a loop a way per value is a loop's subtree per value,
+            # truffle_scan's first block shifted by s & 31 would be 32)
+            self.few[key] = self.few_values(st, t, most) or (self.count_range(st, t, span_most) if st.gen is not None else None)
+        vals = self.few[key]
+        if not vals or len(vals) < 2:
+            return None
+        out = []
+        for v in vals:
+            s = st.copy()
+            s.pc.append(S.eq(t, const(64, v)))
+            s.gpr[full] = const(64, v)
+            s.trace.append(st.rip)
+            out.append(s)
+        if self.args.verbose:
+            print('    the count %s at %#x: %d cases (%s)' % (full, st.rip, len(vals), ', '.join(str(v) for v in vals)), flush=True)
+        return out
+
+    def count_range(self, st, t, most):
+        """[lo, hi] when the path bounds t to at most `most` values there (hi, lo
+        proved; the first values below the path's lowest dropped), else None."""
+        for hi in (most - 1, 2 * most - 1):
+            if self.solver.check(*st.pc, S.ult(const(t.w, hi), t), timeout=AUX) == 'unsat':
+                break
+        else:
+            return None
+        lo = max(0, hi - most + 1)
+        if lo and self.solver.check(*st.pc, S.ult(t, const(t.w, lo)), timeout=AUX) != 'unsat':
+            return None
+        for _ in range(2):
+            if lo < hi and self.solver.check(*st.pc, S.eq(t, const(t.w, lo)), timeout=AUX) == 'unsat':
+                lo += 1
+        return list(range(lo, hi + 1))
+
+    def few_values(self, st, t, most):
+        """The values of t on the path, when there are at most `most`; else None."""
+        vals = []
+        for _ in range(most + 1):
+            r = self.solver.check(*st.pc, *[S.not_(S.eq(t, const(t.w, v))) for v in vals], keep=True, timeout=AUX)
+            if r == 'unsat':
+                return vals
+            if r != 'sat' or len(vals) == most:
+                if r == 'sat':
+                    self.solver.values([t])  # the model's: taken, so the session goes on
+                return None
+            text = self.solver.values([t])
+            m = re.search(r'#b([01]+)|#x([0-9a-fA-F]+)|\(_ bv(\d+) \d+\)', text)
+            if m is None:
+                return None
+            vals.append(int(m.group(1), 2) if m.group(1) else int(m.group(2), 16) if m.group(2) else int(m.group(3)))
+        return None
+
+    def abstract_of(self, st):
+        """The terms a check's first try replaces: the spec's predicates by
+        uninterpreted ones, and a lane's test of its byte that the lane lemma
+        says is the predicate (its instance, true for every byte) by the same
+        uninterpreted one: the 16 x 16 compares of a pcmpistri block, say,
+        never bit-blasted where the facts settle them."""
+        extra = getattr(st, 'lane_abstract', None)
+        if not extra or self.abstract is None:
+            return self.abstract
+        return {**self.abstract, **extra}
+
     def later(self, check, st, *args, **kw):
         """A check that does not steer the walk (a return's obligations, an
         access's bounds, a loop's base and step cases): with checking
@@ -2269,6 +2446,7 @@ class Prover:
         if facts:
             st = st.copy()
             st.pc = st.pc + facts
+            st.lane_abstract = self.spec.lanes.get('last_subst')
         if self.pool is None:
             return check(st, *args, **kw)
         self.pool.submit(check, st if facts else st.copy(), args, kw)
@@ -2297,7 +2475,7 @@ class Prover:
         for k, limit in rounds:
             rs = []
             for i, part in enumerate(ways[k]):
-                r = 'unsat' if (k, i) in done else self.solver.check(*st.pc, *part, timeout=limit, abstract=self.abstract)
+                r = 'unsat' if (k, i) in done else self.solver.check(*st.pc, *part, timeout=limit, abstract=self.abstract_of(st))
                 if r == 'unsat':
                     done.add((k, i))
                 rs.append(r)
@@ -2330,7 +2508,7 @@ class Prover:
         # first on what the path says of the addresses alone (fewer hypotheses: unsat holds for the whole): the
         # bytes compared before, reads at the stop's offset among them, can take the solver half an hour
         plain = self.plain(st)
-        if len(plain) < len(self.solver.assumed) + len(st.pc) and self.solver.check(*plain, *flat, bare=True, timeout=AUX, abstract=self.abstract) == 'unsat':
+        if len(plain) < len(self.solver.assumed) + len(st.pc) and self.solver.check(*plain, *flat, bare=True, timeout=AUX, abstract=self.abstract_of(st)) == 'unsat':
             return
         # then with this way round's conditions on memory too (past a loop's head: the masks of the block it
         # tests, "a byte found", not the bytes the path compared before the loop): a tzcnt's index below 64
@@ -2338,11 +2516,11 @@ class Prover:
         if recent:  # and the assumptions on memory (z a stop: the found byte's NUL against the block's masks)
             recent = [c for c in self.solver.assumed if S.has_array(c)] + recent
         if recent and len(plain) + len(recent) < len(self.solver.assumed) + len(st.pc) and \
-                self.solver.check(*plain, *recent, *flat, bare=True, timeout=6 * AUX, abstract=self.abstract) == 'unsat':  # strcpy_long's: 83 s, the path's 133
+                self.solver.check(*plain, *recent, *flat, bare=True, timeout=6 * AUX, abstract=self.abstract_of(st)) == 'unsat':  # strcpy_long's: 83 s, the path's 133
             return
         each = next((c for c in flat if c.op == 'or_b'), None) if lanes else None
         self.solver.doing = what + ': the path'
-        r = self.solver.check(*st.pc, *flat, keep=True, timeout=AUX if each is not None else 3 * AUX if end is not None else None, abstract=self.abstract)
+        r = self.solver.check(*st.pc, *flat, keep=True, timeout=AUX if each is not None else 3 * AUX if end is not None else None, abstract=self.abstract_of(st))
         if r == 'unknown' and end is not None:  # a load past a stop the bytes compared before rule out (strcmp evex
             # past its loops: a byte at a mask's first set bit, 870 s): the stop not below its page first, by the loads
             lemma = None
@@ -2353,7 +2531,7 @@ class Prover:
                     return
                 lemma = lemma or got
             self.solver.doing = what + ': the path%s' % (' and the lemma' if lemma is not None else ', no lemma')
-            r = self.solver.check(*st.pc, *([lemma] if lemma is not None else []), *flat, keep=True, abstract=self.abstract)
+            r = self.solver.check(*st.pc, *([lemma] if lemma is not None else []), *flat, keep=True, abstract=self.abstract_of(st))
         if r == 'unknown' and each is not None:  # strcmp evex past three loops: 431 s, a lane alone 1 or 2 s
             rest = [c for c in flat if c is not each]
             for x in each.args:
@@ -2366,12 +2544,14 @@ class Prover:
 
     def prove(self, st, obligations, show):
         for what, conds in obligations:
+            if not isinstance(conds, Alt) and len(chunked(conds)) > 1:
+                conds = Alt([[conds]])
             if isinstance(conds, Alt):
                 self.prove_alt(st, what, conds, show)
                 continue
             t1 = time.time()
             self.solver.doing = what
-            r = self.solver.check(*st.pc, *conds, keep=True, abstract=self.abstract)
+            r = self.solver.check(*st.pc, *conds, keep=True, abstract=self.abstract_of(st))
             if self.args.verbose:
                 print('   %-50s %s %.1f s' % (what, r, time.time() - t1), flush=True)
             if r == 'sat':
@@ -2383,7 +2563,7 @@ class Prover:
     def prove_alt(self, st, what, alt, show):
         """The ways in rounds: each but the last for 10 s, again for 120,
         then the last with the full timeout, then the others with it."""
-        ways = alt.alts
+        ways = [[q for part in way for q in chunked(part)] for way in alt.alts]
         rounds = [(k, AUX // 2) for k in range(len(ways) - 1)] + [(k, 6 * AUX) for k in range(len(ways) - 1)] + [(len(ways) - 1, None)] + \
             [(k, None) for k in range(len(ways) - 1)]
         best = self.best_way.get((what, len(ways)))
@@ -2391,11 +2571,12 @@ class Prover:
             rounds.insert(0, (best, 6 * AUX))
         done = set()  # the parts proved in an earlier round
         self.solver.doing = what
+        self.solver.note = 'at %#x, branches at %s' % (st.rip, ' '.join('%#x' % x for x in st.trace[-12:]))
         for k, limit in rounds:
             t1 = time.time()
             rs = []
             for i, conds in enumerate(ways[k]):
-                r = 'unsat' if (k, i) in done else self.solver.check(*st.pc, *conds, keep=True, timeout=limit, abstract=self.abstract)
+                r = 'unsat' if (k, i) in done else self.solver.check(*st.pc, *conds, keep=True, timeout=limit, abstract=self.abstract_of(st))
                 if r == 'unsat':
                     done.add((k, i))
                 if r == 'sat':
@@ -2458,6 +2639,8 @@ class Prover:
                 if len(front) > 1:  # the one the iteration's accesses are at
                     acc = [e[0] for e in s2.loads[len(s1.loads):] + s2.stores[len(s1.stores):]]
                     front = [r for r in front if any(X.offset_from(x, s1.gpr[r]) is not None and S.is_const(X.offset_from(x, s1.gpr[r])) for x in acc)]
+            if len(front) > 1 and all(s1.gpr[r] is s1.gpr[front[0]] and s2.gpr[r] is s2.gpr[front[0]] for r in front):
+                front = front[:1]  # copies of one pointer (an unrolled loop's exits read r9 = rax): one frontier, not a base and an index
             down = variable = False
             if len(front) == 1:
                 step = moved[front[0]]  # the frontier's step; the other registers move by multiples of it (a count down, say)
@@ -2939,6 +3122,10 @@ class Prover:
                         closed = True
                         break
                     continue
+                forks = self.shift_cases(st)
+                if forks:  # a shift by a register of a few values: a way per value, each shift by a constant
+                    st = forks[0]
+                    work.extend(forks[1:])
                 seen, seen_st, seen_al, seen_rq = len(st.loads), len(st.stores), len(st.aligned), len(st.requires)
                 succ = self.mach.step(st)
                 for bad, what, rrip in st.requires[seen_rq:]:
@@ -2990,17 +3177,21 @@ class Prover:
                     s.trace.append(s.rip)
                     st = s
                     continue
-                live = []
+                live, dead = [], 0
                 for s, c in succ:
                     if c is S.FALSE:
                         continue
                     if c is S.TRUE:
                         live.append(s)
                         continue
-                    if self.solver.check(*s.pc, c, loose=True) != 'unsat':  # a dead branch may stay: sound
+                    # a two-way branch whose one way is dead: the other is the path's own (no query; a dead
+                    # branch may stay: sound)
+                    if (dead and len(succ) == 2) or self.solver.check(*s.pc, c, loose=True) != 'unsat':
                         s.pc.append(c)
                         s.trace.append(s.rip)
                         live.append(s)
+                    else:
+                        dead += 1
                 if not live:  # the ways' conditions cover every case: the path's own facts contradict (a dead way kept)
                     if self.solver.check(*st.pc) != 'unsat':
                         raise Failure('no feasible way on at %#x' % st.rip)
@@ -3034,6 +3225,8 @@ def main():
     ap.add_argument('--workers', type=int, default=int(os.environ.get('PROVE_WORKERS', '1')),
                     help='checking threads, each with its own solvers (1: the walk checks as it goes)')
     ap.add_argument('--prefix', default='', help='0s and 1s: the ways this run takes at a path\'s first two-way branches (the runs of every prefix of a length: one proof)')
+    ap.add_argument('--setmax', type=int, default=SETMAX, help='strspn, strcspn: the short spec takes the sets of up to this many bytes, '
+                    'the long one the longer ones (the same for both: together every set; sse2\'s table scan, one code from 2 bytes on: 1)')
     args = ap.parse_args()
     img = X.Image(args.elf)
     mach = X.Machine(img, bmi=not args.func.startswith(('sse2.', 'sse42.')))
@@ -3046,6 +3239,8 @@ def main():
     total = [0, 0, 0]
     for a in classes:
         spec = SPECS[args.spec](args.max, args.induct)
+        if isinstance(spec, Span):
+            spec.setmax = args.setmax
         solver = S.Solver(log=log)
         params, assume = spec.setup(a, align)
         for c in assume:

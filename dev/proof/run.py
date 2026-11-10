@@ -123,10 +123,12 @@ def main():
     import machine
     import prove
     img = machine.Image(args.elf)
+    import targets
     mode = ['--induct'] if args.induct else ['--max', str(args.max)]
     def job(spec, f, a, classes=None, timeout=None):
+        setmax = targets.SETMAX.get((spec, f.split('.')[0]))
         return (['--job-timeout', str(timeout)] if timeout else []) + ['--elf', 'libstr.elf', '--func', f, '--spec', spec, *mode] + \
-            (['--classes', str(classes)] if classes else []) + ['--align', str(a)]
+            (['--classes', str(classes)] if classes else []) + ['--align', str(a)] + (['--setmax', str(setmax)] if setmax else [])
 
     jobs, same, rep, split = [], {}, {}, {}
     for item in args.func.split(','):

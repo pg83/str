@@ -106,6 +106,36 @@ answer not a match). The term layer
 also keeps psrlw's bytes their own: (w >> 4) & 15 of a word's low byte no
 longer reads its high byte.
 
+The lemma is asked once per term: a term that reads anything besides the
+byte and the set (a lane of a block shuffled by s & 15) gets none, and the
+retry under the path's conditions on the set takes those alone (it took
+every condition that did not read s, a new key on every path: 6000 lemma
+queries in sse42 strspn's first ten minutes, 200 now). A lane's term with
+a lemma is also what a check's first try replaces by the uninterpreted
+predicate (member_of, as the spec's member(b) is): the 16 x 16 byte
+compares of a pcmpistri block are not bit-blasted where the facts settle
+them. strcspn's stop, member(b) or the NUL, keeps member(b) a term of its
+own for that (or_ flattened its disjuncts into the stop's, and no
+abstraction applied: strcspn ran two to three times strspn's time).
+
+The page-safe head load (load16_from: pshufb of the aligned block by
+iota + (p & 15), the lanes past 15 made negative) is read as what it is:
+lane i is 0 where i + (p & 15) > 15, else the byte at p + i (the index
+a | (a > 15 ? 0xff : 0) gives the guard and the byte; the block's address
+plus p's low bits folds to p), and pcmpistri takes a lane ite(g, 0, y) as
+the NUL where g and y's tests elsewhere, so the lane lemma applies to y.
+With every pointer in one class those lanes were the bytes at the block's
+address plus a symbolic index, matched against the spec's offsets by the
+solver: "no match before the answer" 41 to 74 s on the head paths, now 3.
+Both rewrites are checked against the plain forms by the solver for any p.
+The blocks after a shuffled head start at 16 - (s & 15), with every pointer
+in one class an offset the solver still matches against the spec's (strspn
+avx2: more than an hour); targets.SPLIT proves strspn and strcspn of sets up
+to 32 bytes in 16 classes in sse42 and the avx2 family, the offsets
+constants there: a class of strcspn avx2, 525 paths in 1292 s with six
+checking threads, 82% of it the walk's branch queries (a two-way branch
+whose one way is dead takes the other with no query).
+
 Past 64 bytes of text (2048 for a set of up to 16) the avx2 family hands
 the rest to truffle_scan32: walked as part of strspn, its tables' loop is a
 way per count and the scan's loop is explored again on each of them, in
@@ -164,6 +194,38 @@ processes of its own, on a copy of the path's state, while the walk goes
 on with its branch queries; the first failure stops the proof as before.
 8 workers: strcmp sse2 21 to 9.5 s, strlen avx2 355 to 116 s, strcmp avx2
 859 to 316 s, strcpy_long sse2 84 to 48 s.
+
+An unrolled loop's exit at its k-th block leaves a span of 16 k + r bytes,
+r the index in the block: written as the 16 k offsets with no bound to
+compare and r's at most 16 (or 32, 64), not 128 offsets each against a
+symbolic length; a long disjunction in an obligation goes to the solver in
+parts of 32 disjuncts (strcspn avx2's exit past its x8 loop: 268 s whole,
+48 in parts). A loop's pointer and its copy (the exits read r9 = rax) are
+one frontier: the generalization took the block counter's step, 8, and a
+frontier that lagged the bytes the loop had tested (strcspn avx2's
+counterexample in both triage runs, refuted natively on 91800 cases).
+
+A shift by a register that takes a few values on the path (at most four,
+the solver asked for each) splits the path by them, the shift then by a
+constant: strlen_tail evex512's first block, its NUL mask shifted by a & 63
+(0, 16, 32 or 48), each bit then a byte at a constant offset from a, not
+one of 64 a symbolic shift may bring (killed at an hour on 4 paths; 140
+paths in 961 s with four threads).
+
+strspn and strcspn split the sets at a length, --setmax N (32): the short
+spec takes those of up to N bytes, the long one longer ones, both proved
+at the same N, so together every set. sse2's code is one table scan for
+every set from 2 bytes on: at N = 32 the short spec ran its table loop
+out once per length, 31 scan loops of hours; at N = 1 (targets.SETMAX) the
+short spec is the 0- and 1-byte paths (6 and 15 s) and the long one the
+table scan once, by its table invariant (332 and 479 s).
+
+PROVE_PROFILE=file writes a line per solver query (seconds, answer, the
+obligation, [abstract] for a first try, the prover's frames that asked):
+where a proof's time goes, before guessing. PROVE_SLOW=s with PROVE_DUMP=dir
+writes a query slower than s seconds as a script of its own, and
+PROVE_DUMP_ABSTRACT=dir a first try that came out sat (what the
+abstraction lost: its model says which byte's predicate was free).
 
 `--prefix 0110` splits one proof by its paths: at a path's first two-way
 branches (before it meets a loop's head or a contract) the run takes the

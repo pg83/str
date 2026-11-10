@@ -18,6 +18,7 @@ import traceback
 
 BOOL, MEM = 0, -1
 SLOW = float(os.environ['PROVE_SLOW']) if os.environ.get('PROVE_SLOW') else None
+PROFILE = os.environ.get('PROVE_PROFILE')  # a file: a line per query asked (seconds, answer, what for, where from)
 INCREMENTAL = os.environ.get('PROVE_INCREMENTAL') == '1'
 MEMORY = int(os.environ.get('PROVE_MEMORY', '6000'))  # megabytes z3 may take
 TIMEOUT = int(os.environ.get('PROVE_TIMEOUT', '900'))  # seconds a query may take: then unknown, which no proof accepts
@@ -511,13 +512,17 @@ def eq(a, b):
         if a.args[2].val == b.val:
             return not_(a.args[0])
         return FALSE
+    if a.op == 'ite' and is_const(b) and is_const(a.args[1]):  # a lane ite(g, 0, y) tested against a constant
+        if a.args[1].val == b.val:
+            return or_(a.args[0], eq(a.args[2], b))
+        return and_(not_(a.args[0]), eq(a.args[2], b))
     return _mk('eq', BOOL, (a, b))
 
 
 def ult(a, b):
     if is_const(a) and is_const(b):
         return boolean(a.val < b.val)
-    if a is b:
+    if a is b or is_const(b) and b.val == 0:
         return FALSE
     return _mk('ult', BOOL, (a, b))
 
@@ -525,7 +530,7 @@ def ult(a, b):
 def ule(a, b):
     if is_const(a) and is_const(b):
         return boolean(a.val <= b.val)
-    if a is b:
+    if a is b or is_const(a) and a.val == 0:
         return TRUE
     return _mk('ule', BOOL, (a, b))
 
@@ -1092,8 +1097,20 @@ class Solver:
         if abstract and not INCREMENTAL:
             allc = ([] if bare else self.assumed) + [c for c in conds if c is not TRUE]
             new = replace(allc, abstract)
-            if any(a is not b for a, b in zip(new, allc)) and self._check(*new, timeout=timeout, bare=True) == 'unsat':
-                return 'unsat'
+            if any(a is not b for a, b in zip(new, allc)):
+                self.abstracting = True
+                try:
+                    r = self._check(*new, timeout=timeout, bare=True)
+                    if r == 'unsat':
+                        return 'unsat'
+                    if r == 'sat' and os.environ.get('PROVE_DUMP_ABSTRACT'):  # what the abstraction loses: the query, to read its model
+                        self.slow += 1
+                        name = os.path.join(os.environ['PROVE_DUMP_ABSTRACT'], 'abstract%d-%d.smt2' % (os.getpid(), self.slow))
+                        self.dump(new, name)
+                        with open(name, 'a') as f:
+                            f.write('; %s\n; %s\n' % (self.doing, getattr(self, 'note', '')))
+                finally:
+                    self.abstracting = False
         if not INCREMENTAL:
             allc = ([] if bare else self.assumed) + list(conds)
             if any(has_quantifier(c) for c in allc):
@@ -1174,6 +1191,10 @@ class Solver:
         if ANSWERS is not None:
             ANSWERS.add(asked, line, limit // 1000)
         dt = time.time() - t0
+        if PROFILE:
+            where = ' < '.join('%s:%d' % (f.name, f.lineno) for f in traceback.extract_stack()[-7:-1][::-1] if f.name not in ('check', '_check'))
+            with open(PROFILE, 'a') as f:
+                f.write('%.3f\t%s\t%s%s\t%s\n' % (dt, line, self.doing, ' [abstract]' if getattr(self, 'abstracting', False) else '', where))
         if SLOW is not None and dt > SLOW:  # PROVE_SLOW=seconds: where the slow queries come from (PROVE_DUMP=dir: each one standalone)
             where = ' < '.join('%s:%d' % (f.name, f.lineno) for f in traceback.extract_stack()[-5:-1][::-1])
             print('    slow query %.1f s, %s: %s' % (dt, line, where), file=sys.stderr, flush=True)

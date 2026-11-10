@@ -53,6 +53,7 @@ def main():
     ap.add_argument('--bin', help='the directory with z3 and bitwuzla')
     ap.add_argument('--classes', type=int)
     ap.add_argument('--align', type=int, default=0)
+    ap.add_argument('--setmax', type=int, help='strspn and strcspn: the short spec\'s longest set (prove.py --setmax)')
     ap.add_argument('--of', nargs='+', default=[], help="the classes' outputs, or the other copy's")
     ap.add_argument('--same-as', help='the copy whose code this one has')
     ap.add_argument('--callee', nargs='+', default=[], help='the outputs of the proofs of the callees the spec takes by contract')
@@ -115,7 +116,8 @@ def main():
         if (Path(args.bin) / 'bitwuzla').exists():
             env['PROVE_BITWUZLA'] = str((Path(args.bin) / 'bitwuzla').resolve())
     cmd = [sys.executable, str(HERE / 'prove.py'), '--elf', args.elf, '--func', args.func, '--spec', args.spec, '--induct',
-           '--classes', str(args.classes or 1), '--align', str(args.align), '--workers', os.environ.get('STR_PROOF_WORKERS', '1')]
+           '--classes', str(args.classes or 1), '--align', str(args.align), '--workers', os.environ.get('STR_PROOF_WORKERS', '1')] + \
+        (['--setmax', str(args.setmax)] if args.setmax else [])
     limit = int(os.environ.get('STR_PROOF_NODE_TIMEOUT') or 0) or None
     p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

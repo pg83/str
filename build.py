@@ -238,7 +238,7 @@ for spec in proof_targets.order():  # a callee's node before its caller's
     for config in proof_targets.configs(spec):
         func, name = copies[config], proof_targets.name(spec, config)
         out, prio = f"$(B)/proof/{name}.txt", proof_targets.priority(spec, config)
-        base = ["--spec", spec, "--func", func]
+        base = ["--spec", spec, "--func", func] + (["--setmax", str(proof_targets.SETMAX[(spec, config)])] if (spec, config) in proof_targets.SETMAX else [])
         callees = [proofs[(dep, config)] for dep in proof_targets.deps(spec, config)]
         contract = ["--callee", *[c.outputs[0] for c in callees]] if callees else []
         if (spec, config) in proof_targets.SAME:  # the code of another configuration's copy: its proof

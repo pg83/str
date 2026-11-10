@@ -73,7 +73,9 @@ for _fn in ('truffle_scan', 'truffle_scan32'):
 # (spec, config) -> classes: those not proved in one class (it did not end
 # in hours, or failed where the classes do not: a shuffle by s & 15)
 SPLIT = {
-    **{(s, c): 16 for s in ('strspn', 'strcspn') for c in ('avx2', 'evex', 'evex512')},
+    # the head block shuffled by s & 15 near a page end, the blocks after it at 16 - (s & 15): a constant in
+    # each class, the spec's offsets the loads' own terms (one class: the solver matched them, an hour and more)
+    **{(s, c): 16 for s in ('strspn', 'strcspn') for c in ('sse42', 'avx2', 'evex', 'evex512')},
 }
 
 # (spec, config) -> the configuration whose copy has the same code
@@ -89,6 +91,12 @@ SAME = {
     ('memchr_large', 'evex512'): 'avx2', ('memchr_large', 'evex512r'): 'avx2', ('memcmp_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512r'): 'avx2',
     ('fill_large', 'evex'): 'avx2', ('fill_large', 'evex512r'): 'evex512', ('copy_large', 'evex512r'): 'evex512',
 }
+
+# (spec, config) -> the set length strspn's and strcspn's short spec ends at, the long one taking the longer
+# sets (both specs of a function the same: together every set). sse2's table scan is one code for every set
+# from 2 bytes on: proved once by the long spec's invariant of the table, not once per length by the short
+# one (its table loop run out 31 times, each a scan loop of its own: hours).
+SETMAX = {(s, 'sse2'): 1 for s in ('strspn', 'strcspn', 'strspn_long', 'strcspn_long')}
 
 DEPS = {'strcat': ('strlen', 'strcpy', 'strcpy_long'), 'strcmp': ('strcmp_tail',), 'strcpy': ('strcpy_long',), 'truffle_scan32': ('truffle_scan',),
         'strlen': ('strlen_tail',), 'memchr': ('memchr_large',), 'memset': ('fill_large',), 'memcpy': ('copy_large',), 'memmove': ('copy_large',),
