@@ -19,16 +19,25 @@ static libc in place of its string routines.
 
 ## Results
 
-Against glibc's own implementations, geometric mean of time per call over
-the ten functions at sizes 5, 25, 125, … weighted 1/size: 0.85× on Zen 5,
-0.83× on Skylake-SP, 0.84× on Broadwell-EP (lower is faster). In one
-process, medians of five runs, our code against the compiler's and against
-glibc at 5 bytes: `strlen` 0.86/1.00 on Zen 5 and 0.63/1.00 on Skylake-SP,
-`memcmp` 1.00/1.00 and 0.75/1.00, `strcpy` 1.00/1.00 and 0.89/0.62,
-`strcat` 1.00/0.59 and 0.97/0.86. What is left behind glibc sits at 125
-bytes and beyond, in the AVX2 kernels that every configuration above AVX2
-still uses for copies and `memcmp`; the 512-bit configuration has its own
-`strcpy_long` and `strcmp_tail`.
+Time per call on the workload of `dev/lab`, relative to glibc on the same
+host (lower is faster):
+
+| platform | configuration | str | glibc 2.44 | FreeBSD | LLVM libc | musl 1.2.5 |
+|---|---|---|---|---|---|---|
+| Zen 5 (Ryzen AI 9 HX 370) | evex512r | **0.52** | 1 (13.8 ns) | 1.53 | 1.63 | 3.01 |
+| Skylake-SP (Xeon Gold 6148) | evex | **0.48** | 1 (15.0 ns) | 1.36 | 1.55 | 2.66 |
+| Broadwell-EP (Xeon E5-2690 v4) | avx2 | **0.90** | 1 (14.2 ns) | 1.32 | 1.53 | 2.42 |
+
+The workload is one trace of calls in a program's proportions (`memcpy`
+25%, `strlen` 20%, `strcmp` 12%, `memset` and `memcmp` 10% each, the rest a
+few percent), its sizes, alignments and contents drawn from measured
+distributions: strings a median of 8 bytes, memory blocks of 14 to 29
+(`dev/lab/workload.py`). Each library runs it with its own function for
+every call: str and glibc as each dispatches on the host, LLVM libc built
+for the host's level. A figure is the time per call net of the stand's own
+cost, the minimum over the passes of four runs with the core's clock held
+at nominal; glibc's own time in parentheses. `dev/lab/libs.py` prints the
+table, each function's trace under it.
 
 ## License
 
