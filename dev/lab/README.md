@@ -205,3 +205,33 @@ instead of evex512r's masked first blocks, memmove's and memset's samples on
 the self-compile fell by half (1.86% of the cycles to 0.92%) and the
 program's cycles stayed the same (-0.07% over 13 runs each): the samples
 moved into the callers. The total is what this measures.
+
+The programs' calls go into kbench too. `pizdos.py trace` records their
+calls of memcpy, memmove and memset with a wasm2o whose GOT entries of them
+are wrappers (`wasm2o/trace.go`: the length, both objects' offsets in the
+module's memory, the call site) and writes a kbench workload,
+`.lab/pizdos/traces.bin`. Each program gets a trace `pz/NAME` of 4 runs of
+32768 consecutive calls spread over the program, the addresses compacted
+by 4 KiB pages (their order, identity and alignment kept), both objects in
+the destination pool as they were in one memory (`memmove_overlap`,
+`memcpy_dst`), the pools zeros and not stored (version 2 of the format;
+kbench resets only what a trace writes). The string functions are not
+recorded: their bytes decide their work.
+
+```
+ix run lib/c bld/compiler bin/go/lang/25 bin/zstd -- python3 dev/lab/pizdos.py trace
+dev/lab/run.py --tag pt-1 --trace .lab/pizdos/traces.bin -- --prims none --no-matrix --libs
+dev/lab/libs.py 'pt-*'                            # the traces pz/NAME after the workload's
+```
+
+A program's calls come in its order: the sizes as its call sites make them,
+learned by the branch predictor as in the program, and the same addresses
+again. file(1)'s are a 144-byte memset and a 128-byte memmove by turns,
+each at one address, 65 000 times a pass. Replayed on Zen 5 (4 runs, ns a
+call net of the stand): glibc 2.66, rep stosb for every size 10.15, rep
+stosb below 128 bytes (1318a0f) 3.35, evex512's masked memset 2.74; the
+workload's memset trace ranks them the other way round. Over the 20
+programs, the geometric mean of the ratios to glibc (2026-11-10): Zen 5
+evex512r with rep stosb for every size 0.77, below 128 bytes 0.53, with
+evex512's memset 0.32; Skylake-SP evex 0.59; Broadwell avx2 1.04, behind
+glibc on djvu, im, magic, CPython's dicts, float and raytrace, and svg.

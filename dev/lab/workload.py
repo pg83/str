@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-OPS = ['memcpy', 'memmove', 'memmove_overlap', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr']
+OPS = ['memcpy', 'memmove', 'memmove_overlap', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'memcpy_dst']
 MIX = {'memcpy': 25, 'strlen': 20, 'strcmp': 12, 'memset': 10, 'memcmp': 10, 'strcpy': 8, 'strcspn': 5, 'memmove': 5, 'memchr': 5, 'strspn': 3, 'strcat': 2}
 SRC_SIZE = 8 << 20   # the first WORK_SET bytes are the working set of the mix (L2-sized); the long-string traces live beyond
 WORK_SET = 2 << 20

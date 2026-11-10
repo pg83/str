@@ -1558,7 +1558,9 @@ static void matrix(const char *regimes) {
 /* -------------------------------------------------------------- the traces */
 
 typedef struct { uint8_t op, pad[3]; uint32_t n; uint64_t a, b; } Rec;
-enum { W_MEMCPY, W_MEMMOVE, W_MEMMOVE_OVL, W_MEMSET, W_MEMCMP, W_STRLEN, W_STRCPY, W_STRCAT, W_STRCMP, W_STRSPN, W_STRCSPN, W_MEMCHR };
+/* W_MEMCPY_DST: a memcpy with both objects in dst (pizdos.py trace: a program's
+   memory is one), as W_MEMMOVE_OVL is a memmove's */
+enum { W_MEMCPY, W_MEMMOVE, W_MEMMOVE_OVL, W_MEMSET, W_MEMCMP, W_STRLEN, W_STRCPY, W_STRCAT, W_STRCMP, W_STRSPN, W_STRCSPN, W_MEMCHR, W_MEMCPY_DST };
 
 static inline __attribute__((always_inline)) uint64_t trace_body(const Kernel *k, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
     uint64_t sum = 0;
@@ -1568,7 +1570,7 @@ static inline __attribute__((always_inline)) uint64_t trace_body(const Kernel *k
 
         switch (q->op) {
         case W_MEMCPY: case W_MEMMOVE: sum += (uintptr_t)((f_cpy)k->fn)(dst + q->b, src + q->a, q->n) - (uintptr_t)(dst + q->b); break;
-        case W_MEMMOVE_OVL: sum += (uintptr_t)((f_cpy)k->fn)(dst + q->b, dst + q->a, q->n) - (uintptr_t)(dst + q->b); break;
+        case W_MEMMOVE_OVL: case W_MEMCPY_DST: sum += (uintptr_t)((f_cpy)k->fn)(dst + q->b, dst + q->a, q->n) - (uintptr_t)(dst + q->b); break;
         case W_MEMSET: sum += (uintptr_t)((f_set)k->fn)(dst + q->b, (int)q->a, q->n) - (uintptr_t)(dst + q->b); break;
         case W_MEMCMP: sum += (uint64_t)(sgn(((f_cmp)k->fn)(src + q->a, src + q->b, q->n)) + 1); break;
         case W_STRLEN: sum += ((f_len)k->fn)((const char *)src + q->a); break;
@@ -1842,6 +1844,7 @@ static inline __attribute__((always_inline)) uint64_t mixed_body(const struct st
         case W_MEMCPY: sum += (uintptr_t)t->memcpy(dst + q->b, src + q->a, q->n) - (uintptr_t)(dst + q->b); break;
         case W_MEMMOVE: sum += (uintptr_t)t->memmove(dst + q->b, src + q->a, q->n) - (uintptr_t)(dst + q->b); break;
         case W_MEMMOVE_OVL: sum += (uintptr_t)t->memmove(dst + q->b, dst + q->a, q->n) - (uintptr_t)(dst + q->b); break;
+        case W_MEMCPY_DST: sum += (uintptr_t)t->memcpy(dst + q->b, dst + q->a, q->n) - (uintptr_t)(dst + q->b); break;
         case W_MEMSET: sum += (uintptr_t)t->memset(dst + q->b, (int)q->a, q->n) - (uintptr_t)(dst + q->b); break;
         case W_MEMCMP: sum += (uint64_t)(sgn(t->memcmp(src + q->a, src + q->b, q->n)) + 1); break;
         case W_STRLEN: sum += t->strlen((const char *)src + q->a); break;
@@ -1896,7 +1899,7 @@ static uint64_t mixed_run(const struct str_table *t, const Rec *recs, uint64_t c
 static int rec_slot(int op) {
     static const int slot[] = {[W_MEMCPY] = P_MEMCPY, [W_MEMMOVE] = P_MEMMOVE, [W_MEMMOVE_OVL] = P_MEMMOVE, [W_MEMSET] = P_MEMSET, [W_MEMCMP] = P_MEMCMP,
                                [W_STRLEN] = P_STRLEN, [W_STRCPY] = P_STRCPY, [W_STRCAT] = P_STRCAT, [W_STRCMP] = P_STRCMP, [W_STRSPN] = P_STRSPN,
-                               [W_STRCSPN] = P_STRCSPN, [W_MEMCHR] = P_MEMCHR};
+                               [W_STRCSPN] = P_STRCSPN, [W_MEMCHR] = P_MEMCHR, [W_MEMCPY_DST] = P_MEMCPY};
     return slot[op];
 }
 
@@ -2043,6 +2046,30 @@ static int trace_prim(const char *full) {
     return -1;
 }
 
+/* The end of what a trace's records write in dst, or read there (an
+   overlapping memmove's source), rounded up to a line. */
+static size_t written(const Rec *recs, uint64_t count, size_t dsz) {
+    size_t end = 0;
+
+    for (uint64_t i = 0; i < count; i++) {
+        const Rec *q = &recs[i];
+        size_t e = 0;
+
+        switch (q->op) {
+        case W_MEMCPY: case W_MEMMOVE: case W_MEMSET: e = q->b + q->n; break;
+        case W_MEMMOVE_OVL: case W_MEMCPY_DST: e = (q->a > q->b ? q->a : q->b) + q->n; break;
+        case W_STRCPY: case W_STRCAT: e = dsz; break; /* their lengths are in the bytes */
+        }
+
+        if (e > end) {
+            end = e;
+        }
+    }
+
+    end = (end + 63) & ~(size_t)63;
+    return end < dsz ? end : dsz;
+}
+
 static void traces(const char *path, int passes) {
     FILE *f = fopen(path, "rb");
     CHECK(f);
@@ -2050,10 +2077,22 @@ static void traces(const char *path, int passes) {
     uint32_t version, ntraces;
     uint64_t ssz, dsz;
     CHECK(fread(magic, 1, 4, f) == 4 && !memcmp(magic, "STRW", 4));
-    CHECK(fread(&version, 4, 1, f) == 1 && fread(&ssz, 8, 1, f) == 1 && fread(&dsz, 8, 1, f) == 1 && fread(&ntraces, 4, 1, f) == 1 && version == 1);
+    CHECK(fread(&version, 4, 1, f) == 1 && fread(&ssz, 8, 1, f) == 1 && fread(&dsz, 8, 1, f) == 1 && fread(&ntraces, 4, 1, f) == 1 &&
+          (version == 1 || version == 2));
     u8x *src, *dst, *image;
     CHECK(!posix_memalign((void **)&src, 4096, ssz) && !posix_memalign((void **)&dst, 4096, dsz) && !posix_memalign((void **)&image, 4096, dsz));
-    CHECK(fread(src, 1, ssz, f) == ssz && fread(image, 1, dsz, f) == dsz);
+
+    if (version == 1) {
+        CHECK(fread(src, 1, ssz, f) == ssz && fread(image, 1, dsz, f) == dsz);
+    } else {
+        /* version 2 (pizdos.py trace: programs' calls of memcpy, memmove and
+           memset, whose bytes do not matter): the pools are zeros, not in the
+           file, and a run resets only the part of dst its trace writes, which
+           may be a small part of pools sized for the largest */
+        memset(src, 0, ssz);
+        memset(image, 0, dsz);
+    }
+
     Kernel **ks = malloc(NK * sizeof *ks);
 
     for (uint32_t t = 0; t < ntraces; t++) {
@@ -2066,9 +2105,10 @@ static void traces(const char *path, int passes) {
         Rec *recs = malloc(count * sizeof *recs);
         CHECK(recs && fread(recs, sizeof *recs, count, f) == count);
         int p = trace_prim(name);
+        size_t reset = version == 1 ? dsz : written(recs, count, dsz);
 
         if (count && (want_libs || (want_mixed && !strcmp(name, "mixed")))) {
-            tables_trace(name, recs, count, src, dst, image, dsz, passes);
+            tables_trace(name, recs, count, src, dst, image, reset, passes);
         }
 
         if (p < 0 || !want_prim[p] || !count) {
@@ -2092,7 +2132,7 @@ static void traces(const char *path, int passes) {
         for (int i = 0; i < nk; i++) {
             Kernel *k = ks[i];
             install(k);
-            memcpy(dst, image, dsz);
+            memcpy(dst, image, reset);
             uint64_t a = now(), sum = trace_run(k, recs, count, src, dst), b = now();
             k->est = (double)(b - a) / (double)count;
             k->iters = k->est * count > 1e7 ? 1 : (size_t)(1e7 / (k->est * count)) + 1; /* about 10 ms a pass */
@@ -2126,7 +2166,7 @@ static void traces(const char *path, int passes) {
             for (int i = 0; i < nk; i++) {
                 Kernel *k = ks[order[i]];
                 install(k);
-                memcpy(dst, image, dsz);
+                memcpy(dst, image, reset);
                 uint64_t a = now(), ap = msr_fd >= 0 ? rdmsr(0xe8) : 0, mp = msr_fd >= 0 ? rdmsr(0xe7) : 0;
 
                 for (size_t it = 0; it < k->iters; it++) {
@@ -2152,7 +2192,7 @@ static void traces(const char *path, int passes) {
             if (pmu_n) {
                 Kernel *k = ks[i];
                 install(k);
-                memcpy(dst, image, dsz);
+                memcpy(dst, image, reset);
                 pmu_start();
 
                 for (size_t it = 0; it < k->iters; it++) {

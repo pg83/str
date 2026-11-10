@@ -5,6 +5,7 @@ measurement of its own, beside kbench's synthetic workload.
     ix run lib/c bld/compiler bin/go/lang/25 bin/zstd -- python3 dev/lab/pizdos.py build NAME=SPEC ...
     dev/lab/pizdos.py run --tag T [--hosts local,lab2,lab3] [--runs 5] [--only aot,magic,py]
     dev/lab/pizdos.py report 'T*' [--base NAME] [--hosts ...]
+    ix run ... -- python3 dev/lab/pizdos.py trace [--only ...]      the programs' calls as kbench traces
 
 pizdos (github.com/pizd0s/kernel, pinned below) runs wasm modules that its
 loader wasm2o compiles to x86-64. A module's memory.copy and memory.fill and
@@ -32,6 +33,14 @@ and records the whole process's cycles and instructions in user mode (the
 startup too, the same for every wasm2o), its times and the digest of its
 output, which must not depend on the wasm2o: .lab/T/<host>/pizdos.jsonl.
 
+trace: the programs' calls of memcpy, memmove and memset, recorded by a
+wasm2o whose GOT entries are wrappers (wasm2o/trace.go), as a kbench workload,
+.lab/pizdos/traces.bin: a trace pz/NAME per program, WINDOWS runs of WINDOW
+consecutive calls spread over it, the addresses compacted by pages (order,
+identity and alignment kept), the pools zeros and not stored (version 2).
+run.py --trace .lab/pizdos/traces.bin -- --prims none --no-matrix --libs
+replays them with every library; libs.py lists them after the workload's.
+
 report: per host and program the base's median cycles (--metric: or
 instructions, the times) and every other wasm2o's ratio to it, the median and
 the range of the ratios run by run (the calls of one run follow each other);
@@ -50,6 +59,7 @@ import re
 import shlex
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import tarfile
@@ -153,13 +163,18 @@ def wasm2o_of(tree, out, pizdos):
     with open(out / 'strcc.log', 'w') as log:
         sh([sys.executable, str(tree / 'dev/strcc.py'), str(tree), '--abi', 'wasm2o', '-o', str(out / 'libstr.a'), '--out', str(out)], stdout=log, stderr=subprocess.STDOUT)
     sh([sys.executable, str(tree / 'tst/wasm2o.py'), '--object', str(out / 'libstr.o')], stdout=subprocess.DEVNULL)
-    tmp = out / 'tmp'
-    tmp.mkdir(exist_ok=True)
+    go_build(pizdos, pizdos / 'bin/wasm2o', out / 'libstr.o', out / 'wasm2o')
+
+
+def go_build(pizdos, src, libstr, out):
+    """wasm2o from its sources in src, with pizdos's runtime, compiler and libstr embedded."""
     go = shutil.which('go')
     if not go:
         raise SystemExit('no go on PATH (ix run ... bin/go/lang/25)')
-    sh([sys.executable, str(pizdos / 'dev/go.py'), 'build', go, str(pizdos / 'bin/wasm2o'), str(out / 'wasm2o'), '--runtime', str(pizdos / 'lib/goruntime'),
-        '--embed', str(pizdos / '.build/bin/aot/aot.aot'), '--embed', str(out / 'libstr.o')], env=dict(os.environ, TMPDIR=str(tmp)))
+    tmp = out.parent / 'tmp'
+    tmp.mkdir(parents=True, exist_ok=True)
+    sh([sys.executable, str(pizdos / 'dev/go.py'), 'build', go, str(src), str(out), '--runtime', str(pizdos / 'lib/goruntime'),
+        '--embed', str(pizdos / '.build/bin/aot/aot.aot'), '--embed', str(libstr)], env=dict(os.environ, TMPDIR=str(tmp)))
     shutil.rmtree(tmp)
 
 
@@ -229,6 +244,101 @@ def bundle_id():
         if p.is_file():
             h.update(p.relative_to(BUNDLE).as_posix().encode() + b'\0' + digest(p).encode())
     return h.hexdigest()[:16]
+
+
+# ----------------------------------------------------------------- trace
+
+RAW = struct.Struct('<IIqqQ')   # wasm2o/trace.go's record: function, length, destination, source or byte, return address
+WINDOWS, WINDOW = 4, 1 << 15
+PAGE = 4096
+W_MEMMOVE_OVL, W_MEMSET, W_MEMCPY_DST = 2, 3, 12   # workload.py's OPS: both objects in the destination pool
+
+
+def tracer(pizdos, libstr, out):
+    """A wasm2o whose str.memcpy, str.memmove and str.memset record every call (wasm2o/trace.go)."""
+    src = out / 'src'
+    shutil.rmtree(src, ignore_errors=True)
+    shutil.copytree(pizdos / 'bin/wasm2o', src)
+    for f in ('trace.go', 'trace_amd64.s'):
+        shutil.copy2(HERE / 'wasm2o' / f, src / f)
+    for name, old, new in (('load.go', '\tif strings.HasPrefix(sym, symStr) {\n\t\treturn strFunction(sym)\n',
+                            '\tif strings.HasPrefix(sym, symStr) {\n\t\tif at := strTraced(sym); at != 0 {\n\t\t\treturn at\n\t\t}\n\n\t\treturn strFunction(sym)\n'),
+                           ('main.go', '\tos.Exit(code)\n', '\tdumpStrTrace()\n\tos.Exit(code)\n')):
+        text = (src / name).read_text()
+        if text.count(old) != 1:
+            raise SystemExit('wasm2o/%s: the tracer\'s anchor is not there once (pizdos moved on?)' % name)
+        (src / name).write_text(text.replace(old, new))
+    go_build(pizdos, src, libstr, out / 'wasm2o')
+    return out / 'wasm2o'
+
+
+def windows(raw):
+    """WINDOWS runs of WINDOW calls, spread over the trace (all of it if shorter)."""
+    n = len(raw) // RAW.size
+    if n <= WINDOWS * WINDOW:
+        return [raw]
+    return [raw[RAW.size * s:RAW.size * (s + WINDOW)] for s in ((2 * k + 1) * n // (2 * WINDOWS) - WINDOW // 2 for k in range(WINDOWS))]
+
+
+def compact(ranges):
+    """The pages the ranges touch, packed in order: an address's offset in the pool."""
+    pages = set()
+    for off, n in ranges:
+        pages.update(range(off // PAGE, (off + max(n, 1) - 1) // PAGE + 1))
+    at = {p: i * PAGE for i, p in enumerate(sorted(pages))}
+    return (lambda off: at[off // PAGE] + off % PAGE), (len(pages) + 1) * PAGE
+
+
+def workload(raws):
+    """The programs' calls as kbench traces (workload.py's format, version 2: the
+    pools are zeros, not stored), all in the destination pool, as all were in
+    the program's memory, its pages compacted per program; the call site's
+    index in the record's three spare bytes."""
+    traces, dsz = [], PAGE
+    for name, raw in raws:
+        recs = [r for w in windows(raw) for r in RAW.iter_unpack(w)]
+        dmap, dn = compact([(d, n) for op, n, d, s, _ in recs] + [(s, n) for op, n, d, s, _ in recs if op != 2])
+        dsz = max(dsz, dn)
+        sites, out = {}, []
+        for op, n, d, s, site in recs:
+            k = sites.setdefault(site, len(sites)) & 0xffffff
+            if op == 2:
+                out.append((W_MEMSET, k, n, s & 255, dmap(d)))
+            else:
+                out.append((W_MEMCPY_DST if op == 0 else W_MEMMOVE_OVL, k, n, dmap(s), dmap(d)))
+        traces.append(('pz/' + name, out))
+        print('pz/%s: %d calls of %d, %d sites, %.1f MiB of memory' % (name, len(out), len(raw) // RAW.size, len(sites), dn / 2**20), flush=True)
+    blob = io.BytesIO()
+    blob.write(b'STRW' + struct.pack('<IQQI', 2, PAGE, dsz, len(traces)))   # version 2: zero pools, not stored
+    rec = struct.Struct('<B3sIQQ')
+    for name, out in traces:
+        blob.write(struct.pack('<I', len(name)) + name.encode() + struct.pack('<Q', len(out)))
+        blob.write(b''.join(rec.pack(op, k.to_bytes(3, 'little'), n, a, b) for op, k, n, a, b in out))
+    return blob.getvalue()
+
+
+def trace(args):
+    if not (BUNDLE / 'manifest.json').exists():
+        raise SystemExit('no bundle: dev/lab/pizdos.py build NAME=SPEC ... first')
+    manifest = json.loads((BUNDLE / 'manifest.json').read_text())
+    pizdos = LAB / 'src' / manifest['pizdos']
+    work = LAB / 'trace'
+    wasm2o = tracer(pizdos, LAB / 'var' / manifest['variants'][0]['name'] / 'libstr.o', work)
+    raws = []
+    for w in manifest['works']:
+        if not selected(w['name'], args.only):
+            continue
+        argv = [a.replace('{wasm2o}', str(wasm2o)) for a in w['argv']]
+        if '--repeat' in argv:
+            argv[argv.index('--repeat') + 1] = '1'   # one pass over the files
+        out = work / (w['name'].replace('/', '_') + '.bin')
+        out.unlink(missing_ok=True)
+        with open(BUNDLE / w['stdin'] if w['stdin'] else os.devnull, 'rb') as i:
+            sh(argv, cwd=BUNDLE, stdin=i, stdout=subprocess.DEVNULL, env=dict(ENV, W2O_STR_TRACE=str(out)))
+        raws.append((w['name'], out.read_bytes()))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_bytes(workload(raws))
+    print('%s: %d traces, %.1f MB' % (args.out, len(raws), args.out.stat().st_size / 1e6))
 
 
 # ------------------------------------------------------------- on a host
@@ -436,13 +546,16 @@ def main():
     p.add_argument('--hosts', default='local,lab2,lab3')
     p.add_argument('--metric', choices=('cycles', 'instructions', 'wall', 'user', 'time'), default='cycles',
                    help="time: the driver's own time of its work (the decoders and CPython print it)")
+    t = sub.add_parser('trace')
+    t.add_argument('--only', default='', help='programs, as for run')
+    t.add_argument('--out', type=Path, default=LAB / 'traces.bin')
     m = sub.add_parser('remote')
     m.add_argument('--cpu', type=int, required=True)
     m.add_argument('--runs', type=int, required=True)
     m.add_argument('--only', default='')
     m.add_argument('--tmp', required=True)
     args = ap.parse_args()
-    dict(build=build, run=run, report=report, remote=remote)[args.command](args)
+    dict(build=build, run=run, report=report, trace=trace, remote=remote)[args.command](args)
 
 
 if __name__ == '__main__':

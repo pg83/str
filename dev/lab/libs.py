@@ -74,13 +74,15 @@ def main():
         clock = meta.get('clock_ghz', [0, 0])
         head.append((cpu, meta['ours_config'], clock, len(runs), {lib: (ratio(lib, 'mixed'), spread(lib, 'mixed')) for lib in LIBS},
                      best.get(('glibc', 'mixed'))))
+        # the workload's traces, then any other a trace file had (pizdos.py trace: a program's calls)
+        traces = [t for t in TRACES if ('glibc', t) in best] + sorted({t for (_, t) in best} - set(TRACES))
         lines = ['-- %s: ours = %s, %d runs, clock %.2f..%.2f GHz; ratio to glibc per trace' % (cpu, meta['ours_config'], len(runs), clock[0], clock[1]),
-                 '   %-8s' % '' + ''.join('%13s' % t for t in TRACES)]
-        lines.append('   %-8s' % 'glibc ns' + ''.join('%13s' % ('%.2f' % best[('glibc', t)] if ('glibc', t) in best else '-') for t in TRACES))
+                 '   %-8s' % '' + ''.join('%13s' % t for t in traces)]
+        lines.append('   %-8s' % 'glibc ns' + ''.join('%13s' % ('%.2f' % best[('glibc', t)] if ('glibc', t) in best else '-') for t in traces))
         for lib in LIBS:
             if lib == 'glibc':
                 continue
-            lines.append('   %-8s' % lib + ''.join('%13s' % ('%.2f' % ratio(lib, t) if ratio(lib, t) else '-') for t in TRACES))
+            lines.append('   %-8s' % lib + ''.join('%13s' % ('%.2f' % ratio(lib, t) if ratio(lib, t) else '-') for t in traces))
         detail.append('\n'.join(lines))
     print('the mixed workload, ns per call net of the stand, ratio to glibc (the range: each run on its own)')
     print('%-52s %-9s' % ('platform', 'config') + ''.join('%17s' % l for l in LIBS))
@@ -88,7 +90,7 @@ def main():
         row = '%-52s %-9s' % (cpu[:52], cfg)
         for lib in LIBS:
             r, s = cells[lib]
-            row += '%17s' % (('%.2f (%.2f-%.2f)' % (r, s[0], s[1])) if r and s and lib != 'glibc' else ('1 (%.2f ns)' % gl if lib == 'glibc' else '-'))
+            row += '%17s' % (('%.2f (%.2f-%.2f)' % (r, s[0], s[1])) if r and s and lib != 'glibc' else ('1 (%.2f ns)' % gl if lib == 'glibc' and gl else '-'))
         print(row)
     print()
     print('\n\n'.join(detail))
