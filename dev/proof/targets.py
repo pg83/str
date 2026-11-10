@@ -13,34 +13,34 @@ strcpy's and strcpy_long's contracts, each proved on its own; strspn's and
 strcspn's the shuffle scan's, in the units that have it). A function not
 every configuration has (truffle_scan) has no entry for the others."""
 
-CONFIGS = ('sse2', 'sse42', 'avx2', 'evex', 'evex512', 'evex512r')
+CONFIGS = ('sse2', 'sse42', 'avx2', 'evex', 'evex512')
 
 # spec -> the symbol of each configuration's copy
 FUNCS = {
     'strlen': {'sse2': 'sse2.strlen_sse2', 'sse42': 'sse42.strlen_sse2', 'avx2': 'avx2.strlen_avx2', 'evex': 'evex.strlen_evex512',
-               'evex512': 'evex512.strlen_evex512', 'evex512r': 'evex512r.strlen_evex512'},
+               'evex512': 'evex512.strlen_evex512'},
     'memchr': {'sse2': 'sse2.memchr_sse2', 'sse42': 'sse42.memchr_sse2', 'avx2': 'avx2.memchr_avx2', 'evex': 'evex.memchr_evex',
-               'evex512': 'evex512.memchr_evex512', 'evex512r': 'evex512r.memchr_evex512'},
+               'evex512': 'evex512.memchr_evex512'},
     'memset': {'sse2': 'sse2.memset_sse2', 'sse42': 'sse42.memset_sse2', 'avx2': 'avx2.memset_avx2', 'evex': 'evex.memset_evex512',
-               'evex512': 'evex512.memset_evex512', 'evex512r': 'evex512r.memset_rep'},
+               'evex512': 'evex512.memset_evex512'},
     'memcpy': {'sse2': 'sse2.memcpy_sse2', 'sse42': 'sse42.memcpy_sse2', 'avx2': 'avx2.memcpy_avx2', 'evex': 'evex.memcpy_evex512',
-               'evex512': 'evex512.memcpy_evex512', 'evex512r': 'evex512r.memcpy_evex512'},
+               'evex512': 'evex512.memcpy_evex512'},
     'memmove': {'sse2': 'sse2.memmove_sse2', 'sse42': 'sse42.memmove_sse2', 'avx2': 'avx2.memmove_avx2', 'evex': 'evex.memmove_evex512',
-                'evex512': 'evex512.memmove_evex512', 'evex512r': 'evex512r.memmove_evex512'},
+                'evex512': 'evex512.memmove_evex512'},
     'memcmp': {'sse2': 'sse2.memcmp_sse2', 'sse42': 'sse42.memcmp_sse2', 'avx2': 'avx2.memcmp_avx2', 'evex': 'evex.memcmp_evex512',
-               'evex512': 'evex512.memcmp_evex512', 'evex512r': 'evex512r.memcmp_evex512'},
+               'evex512': 'evex512.memcmp_evex512'},
     'strcmp': {'sse2': 'sse2.strcmp_sse2', 'sse42': 'sse42.strcmp_sse2', 'avx2': 'avx2.strcmp_avx2', 'evex': 'evex.strcmp_evex',
-               'evex512': 'evex512.strcmp_evex', 'evex512r': 'evex512r.strcmp_evex'},
+               'evex512': 'evex512.strcmp_evex'},
     'strcpy': {'sse2': 'sse2.strcpy_sse2', 'sse42': 'sse42.strcpy_sse2', 'avx2': 'avx2.strcpy_avx2', 'evex': 'evex.strcpy_evex',
-               'evex512': 'evex512.strcpy_evex', 'evex512r': 'evex512r.strcpy_evex'},
+               'evex512': 'evex512.strcpy_evex'},
     'strcpy_long': {'sse2': 'sse2.strcpy_long_sse2', 'sse42': 'sse42.strcpy_long_sse2', 'avx2': 'avx2.strcpy_long_avx2',
-                    'evex': 'evex.strcpy_long_avx2', 'evex512': 'evex512.strcpy_long_evex512', 'evex512r': 'evex512r.strcpy_long_evex512'},
+                    'evex': 'evex.strcpy_long_avx2', 'evex512': 'evex512.strcpy_long_evex512'},
     'strcat': {'sse2': 'sse2.strcat_sse2', 'sse42': 'sse42.strcat_sse2', 'avx2': 'avx2.strcat_avx2', 'evex': 'evex.strcat_evex',
-               'evex512': 'evex512.strcat_evex', 'evex512r': 'evex512r.strcat_evex'},
+               'evex512': 'evex512.strcat_evex'},
     'strspn': {'sse2': 'sse2.strspn_sse2', 'sse42': 'sse42.strspn_sse42', 'avx2': 'avx2.strspn_avx2', 'evex': 'evex.strspn_avx2',
-               'evex512': 'evex512.strspn_avx2_zen', 'evex512r': 'evex512r.strspn_avx2_zen'},
+               'evex512': 'evex512.strspn_avx2_zen'},
     'strcspn': {'sse2': 'sse2.strcspn_sse2', 'sse42': 'sse42.strcspn_sse42', 'avx2': 'avx2.strcspn_avx2', 'evex': 'evex.strcspn_avx2',
-                'evex512': 'evex512.strcspn_avx2_zen', 'evex512r': 'evex512r.strcspn_avx2_zen'},
+                'evex512': 'evex512.strcspn_avx2_zen'},
 }
 # the long sets (more than 32 bytes) of the same functions, a spec of their own
 FUNCS['strspn_long'] = dict(FUNCS['strspn'])
@@ -51,22 +51,19 @@ FUNCS['strcspn_long'] = dict(FUNCS['strcspn'])
 _K = {'strlen_tail': ('strlen_tail_sse2', 'strlen_tail_avx2', 'strlen_tail_evex512'), 'memchr_large': ('memchr_large_sse2', 'memchr_large_avx2'),
       'fill_large': ('fill_large_sse2', 'fill_large_avx2', 'fill_large_evex512'), 'copy_large': ('copy_large_sse2', 'copy_large_avx2'),
       'memcmp_large': ('memcmp_large_sse2', 'memcmp_large_avx2')}
-_KCONF = {'sse2': 0, 'sse42': 0, 'avx2': 1, 'evex': 1, 'evex512': -1, 'evex512r': -1}  # which of a kernel's copies each configuration names
+_KCONF = {'sse2': 0, 'sse42': 0, 'avx2': 1, 'evex': 1, 'evex512': -1}  # which of a kernel's copies each configuration names
 for _spec, _fns in _K.items():
     FUNCS[_spec] = {c: '%s.%s' % (c, _fns[i] if i >= 0 else _fns[-1]) for c, i in _KCONF.items()}
 FUNCS['copy_large']['evex512'] = 'evex512.copy_large_avx2'
-FUNCS['copy_large']['evex512r'] = 'evex512r.copy_large_avx2'
 FUNCS['memchr_large']['evex512'] = 'evex512.memchr_large_avx2'
-FUNCS['memchr_large']['evex512r'] = 'evex512r.memchr_large_avx2'
 FUNCS['memcmp_large']['evex512'] = 'evex512.memcmp_large_avx2'
-FUNCS['memcmp_large']['evex512r'] = 'evex512r.memcmp_large_avx2'
 
 # strcmp's kernel past its first blocks, any pointers: strcmp itself, proved apart (strcmp takes it by its contract)
 FUNCS['strcmp_tail'] = {'sse2': 'sse2.strcmp_tail_sse2', 'sse42': 'sse42.strcmp_tail_sse2', 'avx2': 'avx2.strcmp_tail_avx2', 'evex': 'evex.strcmp_tail_evex',
-                        'evex512': 'evex512.strcmp_tail_evex512', 'evex512r': 'evex512r.strcmp_tail_evex512'}
+                        'evex512': 'evex512.strcmp_tail_evex512'}
 
 # the shuffle scan of the avx2 family's strspn and strcspn, proved apart: the tables' build, the scan for any tables
-TRUFFLE = ('avx2', 'evex', 'evex512', 'evex512r')
+TRUFFLE = ('avx2', 'evex', 'evex512')
 for _fn in ('truffle_scan', 'truffle_scan32'):
     FUNCS[_fn] = {c: '%s.%s' % (c, _fn) for c in TRUFFLE}
 
@@ -82,14 +79,10 @@ SPLIT = {
 SAME = {
     **{(s, 'sse42'): 'sse2' for s in ('strlen', 'memchr', 'memset', 'memcpy', 'memmove', 'memcmp', 'strcmp', 'strcmp_tail', 'strcpy', 'strcpy_long',
                                       'strcat')},
-    **{(s, 'evex512r'): 'evex512' for s in ('memchr', 'memcpy', 'memmove', 'memcmp', 'strcmp', 'strcmp_tail', 'strspn', 'strspn_long')},
-    **{(s, c): 'avx2' for s in ('truffle_scan', 'truffle_scan32') for c in ('evex512', 'evex512r')},
-    ('strcspn', 'evex512r'): 'evex512',  # the same past their contracts' callees
-    ('strcat', 'evex512r'): 'evex512',
+    **{(s, 'evex512'): 'avx2' for s in ('truffle_scan', 'truffle_scan32')},
     **{(s, 'sse42'): 'sse2' for s in _K},
-    **{(s, c): 'evex' for s in ('memcpy', 'memmove', 'memcmp') for c in ('evex512', 'evex512r')},
-    ('memchr_large', 'evex512'): 'avx2', ('memchr_large', 'evex512r'): 'avx2', ('memcmp_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512r'): 'avx2',
-    ('fill_large', 'evex'): 'avx2', ('fill_large', 'evex512r'): 'evex512', ('copy_large', 'evex512r'): 'evex512',
+    **{(s, 'evex512'): 'evex' for s in ('memcpy', 'memmove', 'memcmp')},
+    ('memchr_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512'): 'avx2', ('fill_large', 'evex'): 'avx2',
 }
 
 # (spec, config) -> the set length strspn's and strcspn's short spec ends at, the long one taking the longer
@@ -114,7 +107,6 @@ SLOT_SPECS = {'strspn': ('strspn', 'strspn_long'), 'strcspn': ('strcspn', 'strcs
 DEPS = {'strcat': ('strlen', 'strcpy', 'strcpy_long'), 'strcmp': ('strcmp_tail',), 'strcpy': ('strcpy_long',), 'truffle_scan32': ('truffle_scan',),
         'strlen': ('strlen_tail',), 'memchr': ('memchr_large',), 'memset': ('fill_large',), 'memcpy': ('copy_large',), 'memmove': ('copy_large',),
         'memcmp': ('memcmp_large',)}
-NO_KERNEL = {('memset', 'evex512r')}  # memset_rep: rep stosb, no kernel
 TRUFFLE_DEPS = {'strspn': ('truffle_scan32',), 'strcspn': ('truffle_scan32', 'strlen')}
 
 # the order the ready proofs start in, the longest first (hours to tens of
@@ -128,7 +120,7 @@ def deps(spec, config):
     """The specs whose proofs this configuration's copy of spec takes its callees from."""
     if config in TRUFFLE and spec in TRUFFLE_DEPS:
         return TRUFFLE_DEPS[spec]
-    return () if (spec, config) in NO_KERNEL else DEPS.get(spec, ())
+    return DEPS.get(spec, ())
 
 
 def order():

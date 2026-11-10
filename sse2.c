@@ -173,17 +173,6 @@ void *copy_huge_rep(u8 *d, const u8 *s, size_t n) {
     RETURN_OPAQUE(d);
 }
 
-/* memset by rep stosb alone, one path for every size: where the microcode
-   starts a short rep stosb fast (Zen 5), it beats every vector memset on the
-   workload's fills, whose sizes no branch tree predicts (dev/lab). From 128
-   bytes on rep stosb starts slowly, some 11 ns a call on a Ryzen AI 9 HX 370
-   against 2.5 to 9 for vectors: a program with a long fill at one call site
-   pays that (dispatch.c, evex512r). */
-void *memset_rep(void *dst, int c, size_t n) {
-    rep_stosb((u8 *)dst, c, n);
-    return dst;
-}
-
 void *fill_huge_rep(u8 *d, int c, size_t n) {
     rep_stosb(d, c, n);
     RETURN_OPAQUE(d);

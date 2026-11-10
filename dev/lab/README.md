@@ -153,17 +153,18 @@ its validation; `run.json` the commit, the binary's hash and the options.
 
 The workload above draws every call's size on its own from a smooth
 distribution; a program's sizes come in peaks at its call sites, and the
-branch predictor learns them there. The two disagree: evex512r's memset by
-rep stosb for every size ran the memset trace 0.80x on Zen 5 and lost 9% in
-file(1)'s decoder, whose 144-byte memset per magic entry takes rep stosb's
-slow start from 128 bytes. So real programs are a measurement of their own,
+branch predictor learns them there. The two disagree: the evex512r
+configuration's memset by rep stosb for every size ran the memset trace
+0.80x on Zen 5 and lost 9% in file(1)'s decoder, whose 144-byte memset per
+magic entry takes rep stosb's slow start from 128 bytes (the configuration
+is gone since: see the programs' calls below). So real programs are a measurement of their own,
 `pizdos.py`, and a change of a first block or a slot is judged by both:
 
 ```
 ix run lib/c bld/compiler bin/go/lang/25 bin/zstd -- python3 dev/lab/pizdos.py build head=HEAD new=work
 dev/lab/pizdos.py run --tag p-1                   # local, lab2, lab3 in parallel, 5 runs, the clock held
 dev/lab/pizdos.py report 'p-*'                    # per host and program: the base's cycles, the others' ratios
-dev/lab/pizdos.py build head=HEAD try=HEAD:evex512r.memset=memset_evex512   # slots replaced, no commit
+dev/lab/pizdos.py build head=HEAD try=HEAD:avx2.fill_huge=fill_huge_sse2     # slots replaced, no commit
 ```
 
 pizdos (github.com/pizd0s/kernel, pinned in `pizdos.py`) is an OS whose
@@ -201,7 +202,7 @@ prints one, the digest); `run.json` with the bundle's id, pizdos's commit,
 and every wasm2o's revision, replaced slots and `libstr.o`'s sha256.
 
 A profile's share of a function is not its cost. With avx2's size trees
-instead of evex512r's masked first blocks, memmove's and memset's samples on
+instead of the masked first blocks on Zen 5, memmove's and memset's samples on
 the self-compile fell by half (1.86% of the cycles to 0.92%) and the
 program's cycles stayed the same (-0.07% over 13 runs each): the samples
 moved into the callers. The total is what this measures.
@@ -233,5 +234,6 @@ stosb below 128 bytes (1318a0f) 3.35, evex512's masked memset 2.74; the
 workload's memset trace ranks them the other way round. Over the 20
 programs, the geometric mean of the ratios to glibc (2026-11-10): Zen 5
 evex512r with rep stosb for every size 0.77, below 128 bytes 0.53, with
-evex512's memset 0.32; Skylake-SP evex 0.59; Broadwell avx2 1.04, behind
-glibc on djvu, im, magic, CPython's dicts, float and raytrace, and svg.
+evex512's memset 0.32, so Zen 5 runs evex512 now; Skylake-SP evex 0.59;
+Broadwell avx2 1.04, behind glibc on djvu, im, magic, CPython's dicts,
+float and raytrace, and svg.

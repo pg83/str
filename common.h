@@ -78,7 +78,7 @@ extern struct str_table str_table;
 
 /* What the host runs well, as bits of str_host(); dispatch.c picks a
    configuration from them. STR_ZMM: 512-bit registers cost nothing extra. */
-enum { STR_SSE42 = 1, STR_AVX2 = 2, STR_AVX512 = 4, STR_ZMM = 8, STR_ERMS = 16, STR_FSRS = 32 }; /* FSRS: a short rep stosb starts fast */
+enum { STR_SSE42 = 1, STR_AVX2 = 2, STR_AVX512 = 4, STR_ZMM = 8, STR_ERMS = 16 };
 unsigned str_host(void);
 /* The decisions are pure functions of a cpuid snapshot, so that the test can
    make them for any host on the one it runs on. */
@@ -89,9 +89,6 @@ struct str_cpuid {
     unsigned ebx7;                                 /* cpuid(7, 0) */
     unsigned ecx81;                                /* cpuid(0x80000001) */
     unsigned xcr0;                                 /* xgetbv(0), 0 without OSXSAVE */
-    unsigned eax71;                                /* cpuid(7, 1).eax */
-    unsigned max_ext;                              /* cpuid(0x80000000).eax */
-    unsigned eax8021;                              /* cpuid(0x80000021).eax, AMD */
 };
 
 void str_cpuid_read(struct str_cpuid *c);
@@ -175,7 +172,6 @@ void *copy_huge_sse2(u8 *d, const u8 *s, size_t n);
 void *fill_huge_sse2(u8 *d, int c, size_t n);
 void *copy_huge_rep(u8 *d, const u8 *s, size_t n);   /* rep movsb: the ERMS hosts */
 void *fill_huge_rep(u8 *d, int c, size_t n);         /* rep stosb */
-void *memset_rep(void *, int, size_t);                 /* rep stosb for every size */
 size_t strspn_table_sse2(const u8 *s, const u8 *set);
 size_t strcspn_table_sse2(const u8 *s, const u8 *set);
 size_t find_byte_or_nul_sse2(const u8 *s, u8 c);

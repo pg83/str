@@ -25,7 +25,9 @@
  *   strcpy     12      8.7         2.2
  *   strcat     7.8     7.7         2.9
  *   strcmp     14      13          6.7
- * Only rep stosb on Zen 5 earns its place (the evex512r configuration).
+ * Only rep stosb on Zen 5 won a trace: the evex512r configuration had it for
+ * memset until the programs' calls (dev/lab/pizdos.py trace) showed it
+ * losing on 18 of 20 programs and tying on 2, 2026-11-10.
  */
 #include <stddef.h>
 #include <stdint.h>

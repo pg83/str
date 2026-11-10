@@ -83,32 +83,13 @@ const struct str_config str_configs[] = {
        and strlen take one 64-byte block first; strcpy, strcat and strcmp keep
        the 16-byte first blocks (measured best), their strcpy_long and
        strcmp_tail kernels are 64-byte; the copy and memcmp kernels stay
-       32-byte. */
+       32-byte. Zen 5's memset was rep stosb, whose short start won the
+       workload's memset trace (0.80x, the evex512r configuration, 2026-11-04);
+       on the 20 programs' own calls it lost on 18 and tied on 2
+       (dev/lab/pizdos.py trace, 2026-11-10: 0.77 of glibc's time over them
+       against this configuration's 0.32). */
     {"evex512", STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS, {
         .memcpy = memcpy_evex512, .memmove = memmove_evex512, .memset = memset_evex512, .memcmp = memcmp_evex512,
-        .strlen = strlen_evex512, .strcpy = strcpy_evex, .strcat = strcat_evex, .strcmp = strcmp_evex,
-        .strspn = strspn_avx2_zen, .strcspn = strcspn_avx2_zen,
-        .copy_large = copy_large_avx2, .fill_large = fill_large_evex512, .memcmp_large = memcmp_large_avx2,
-        .strlen_tail = strlen_tail_evex512, .strcmp_tail = strcmp_tail_evex512, .strcpy_long = strcpy_long_evex512,
-        .copy_huge = copy_huge_avx2, .fill_huge = fill_huge_rep,
-        .memchr = memchr_evex512, .memchr_large = memchr_large_avx2,
-    }},
-    /* evex512 where the CPU starts a short rep stosb fast (FSRS: Zen 5 among
-       them): memset by rep stosb for every size, one path where the vector
-       memset's size tree mispredicts on the workload's fills. A Ryzen AI 9 HX
-       370: the memset trace 0.80x (clock held) and 0.83x (turbo), the mixed
-       trace 0.964x and 0.965x (dev/lab, 2026-11-04). Skylake-SP and Broadwell,
-       without FSRS, run it 1.4x and 1.03x slower. Against vectors from 128
-       bytes on (1318a0f, reverted): the memset trace 0.47 of glibc's time
-       against 0.63, the mixed 0.51 against 0.52; that path's branches
-       mispredict 0.34 times a call there, rep stosb has none. pizdos's
-       programs say otherwise (dev/lab/pizdos.py, 2026-11-10): file(1)'s
-       decoder, a 144-byte memset per magic entry, runs 9% slower with rep
-       stosb for every size, the other 19 programs the same. The workload
-       draws its sizes call by call; a program's come from its call sites,
-       where those branches are predicted. */
-    {"evex512r", STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS | STR_FSRS, {
-        .memcpy = memcpy_evex512, .memmove = memmove_evex512, .memset = memset_rep, .memcmp = memcmp_evex512,
         .strlen = strlen_evex512, .strcpy = strcpy_evex, .strcat = strcat_evex, .strcmp = strcmp_evex,
         .strspn = strspn_avx2_zen, .strcspn = strcspn_avx2_zen,
         .copy_large = copy_large_avx2, .fill_large = fill_large_evex512, .memcmp_large = memcmp_large_avx2,
@@ -147,12 +128,6 @@ void str_cpuid_read(struct str_cpuid *c) {
     c->ebx7 = r[1];
     cpuid(0x80000001u, 0, r);
     c->ecx81 = r[2];
-    cpuid(7, 1, r);
-    c->eax71 = r[0];
-    cpuid(0x80000000u, 0, r);
-    c->max_ext = r[0];
-    cpuid(0x80000021u, 0, r); /* past the highest extended leaf garbage: str_host_of looks at max_ext */
-    c->eax8021 = r[0];
     c->xcr0 = 0;
 
     if (bit(c->ecx1, 27)) { /* uncoverable: xgetbv faults without OSXSAVE, a CPU this test does not run on */
@@ -171,11 +146,6 @@ unsigned str_host_of(const struct str_cpuid *c) {
     unsigned family = (c->eax1 >> 8) & 0xf, model = ((c->eax1 >> 4) & 0xf) | ((c->eax1 >> 12) & 0xf0);
     unsigned ecx1 = c->ecx1, ebx7 = c->ebx7, ecx81 = c->ecx81;
     unsigned have = bit(ebx7, 9) ? STR_ERMS : 0;   /* fast rep movsb/stosb */
-
-    /* fast short rep stosb: Intel says so in leaf 7.1, AMD in 0x80000021 */
-    if (bit(c->eax71, 11) || (!intel && c->max_ext >= 0x80000021u && bit(c->eax8021, 10))) {
-        have |= STR_FSRS;
-    }
 
     /* x86-64-v2: SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, CMPXCHG16B, LAHF/SAHF */
     if (!(bit(ecx1, 0) && bit(ecx1, 9) && bit(ecx1, 19) && bit(ecx1, 20) && bit(ecx1, 23) && bit(ecx1, 13) && bit(ecx81, 0))) {

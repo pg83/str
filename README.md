@@ -37,7 +37,7 @@ host (lower is faster):
 
 | platform | configuration | str | glibc 2.44 | FreeBSD | LLVM libc | musl 1.2.5 |
 |---|---|---|---|---|---|---|
-| Zen 5 (Ryzen AI 9 HX 370) | evex512r | **0.52** | 1 (13.8 ns) | 1.53 | 1.63 | 3.01 |
+| Zen 5 (Ryzen AI 9 HX 370) | evex512 | **0.54** | 1 (14.0 ns) | 1.53 | 1.60 | 2.95 |
 | Skylake-SP (Xeon Gold 6148) | evex | **0.48** | 1 (15.0 ns) | 1.36 | 1.55 | 2.66 |
 | Broadwell-EP (Xeon E5-2690 v4) | avx2 | **0.90** | 1 (14.2 ns) | 1.32 | 1.53 | 2.42 |
 
