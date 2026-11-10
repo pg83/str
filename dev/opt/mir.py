@@ -152,14 +152,22 @@ class Ins:
         return out
 
     def map(self, f):
+        """The registers renamed by f in operands of this instruction's own: an
+        operand may be one object with another instruction's (the copy and the
+        two-address operation made of one IR value), which keeps its registers
+        (a spill renames the copy's destination, the operation's reads it back)."""
+        ops = []
         for o in self.ops:
             if isinstance(o, Reg):
-                o.r = f(o.r)
+                o = Reg(f(o.r), o.bits)
             elif isinstance(o, Mem):
+                o = o.copy()
                 if o.base is not None:
                     o.base = f(o.base)
                 if o.index is not None:
                     o.index = f(o.index)
+            ops.append(o)
+        self.ops = ops
         if self.mask is not None:
             self.mask = f(self.mask)
 

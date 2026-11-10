@@ -2,7 +2,7 @@
 from .asm import assemble, order_blocks
 from .frame import frame, vzeroupper
 from .isel import select
-from .mir import Label, Reg, Imm, Mem, FLAGS, FLAG_WRITERS
+from .mir import GPR, Label, Reg, Imm, Mem, FLAGS, FLAG_WRITERS
 from .regalloc import allocate, dead_code, liveness
 
 FLAG_READERS = {'cmov', 'set', 'adc', 'sbb', 'j'}
@@ -28,6 +28,36 @@ def peephole(mf):
                     i.op, i.ops, i.acc, i.kind = 'add', [i.ops[0], Imm(m.disp, 32)], ['rw', 'r'], None
             if i.op in FLAG_WRITERS or FLAGS in i.imp_def:
                 live = False
+
+
+def redundant_copies(mf):
+    """A 64-bit copy between general registers that already hold one value
+    goes: equal since a copy earlier in the block, or at the end of its only
+    predecessor when that is laid out before it, with neither written since
+    (a call keeps the callee-saved ones). What the allocator leaves where a
+    value lives in two registers: a parameter kept in a callee-saved one
+    across a call and passed to it again from there."""
+    preds = {}
+    for b in mf.blocks:
+        for s in b.succs:
+            preds.setdefault(s, []).append(b)
+    at_end = {}
+    for b in mf.blocks:
+        p = preds.get(b, [])
+        same = dict(at_end[p[0]]) if len(p) == 1 and p[0] in at_end else {}   # register -> its value's token
+        kept = []
+        for i in b.ins:
+            if i.kind == 'copy' and i.op == 'mov' and all(isinstance(o, Reg) and o.bits == 64 and o.r in GPR for o in i.ops):
+                d, s = i.ops[0].r, i.ops[1].r
+                if d in same and same.get(s) is same[d]:
+                    continue
+                same[d] = same.setdefault(s, object())
+            else:
+                for r in i.defs():
+                    same.pop(r, None)
+            kept.append(i)
+        b.ins = kept
+        at_end[b] = same
 
 
 def thread_jumps(mf):
@@ -103,6 +133,7 @@ def compile_function(fn, isa, phase=0, jcc_align=False):
     dead_code(mf)
     hoist_latch_copies(mf)
     thread_jumps(mf)
+    redundant_copies(mf)
     peephole(mf)
     frame(mf)
     vzeroupper(mf)

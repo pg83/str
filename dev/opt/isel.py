@@ -1396,10 +1396,11 @@ class ISel:
             else:
                 bits = 64 if a.ty.bits > 32 else 32
                 self.emit('mov', Reg(preg, bits), self.reg(a, bits), acc='w r', kind='copy')
-        # is this a tail call? the next op is the return of its result
+        # is this a tail call? the next op is the return of its result, or a return of nothing
+        # (a void function's last call: what the callee leaves in rax nobody reads)
         term = op.block.term
         body = op.block.ops
-        tail = (body[-1] is op and term.kind == 'ret' and (not term.args and op.result is None or term.args and term.args[0] is op.result))
+        tail = (body[-1] is op and term.kind == 'ret' and (not term.args or term.args[0] is op.result))
         if callee.op.kind == 'sym':
             target = Sym(callee.op.attrs['name'])
         elif callee.op.kind == 'load' and callee.op in self.skip and callee not in self.vregs:
