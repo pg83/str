@@ -2169,8 +2169,629 @@ class TruffleScan32:
         return [self.count, self.members, self.r]
 
 
+# ------------------------------------------------------------ derived.c
+
+DERIVED_ENTRIES = ('str_memchr', 'str_strlen', 'str_strspn', 'str_strcspn', 'str_memcpy', 'str_memmove', 'str_memset', 'str_memcmp', 'malloc')
+
+
+class Obj:
+    """An object of a derived function's spec: a region of its own (base,
+    the memory at its entry, its index among the regions), the bytes
+    [0, read) from the base that may be read and [0, write) that may be
+    written; stop: a string's NUL (z, any) or a bounded object's end
+    (memchr's z: a NUL before n, or n), where its callees' contracts are
+    instanced."""
+
+    def __init__(self, name, base, arr, k):
+        self.name, self.base, self.arr, self.k = name, base, arr, k
+        self.read = self.write = const(64, 0)
+        self.stop = self.n = None
+
+
+def member(inset, x):
+    """The byte x in the set: bit x of the set's 256 (the NUL's never)."""
+    return S.eq(S.extract(S.lshr(inset, S.zext(x, 256)), 0, 0), const(1, 1))
+
+
+def fits(off, n, limit):
+    """[off, off + n) inside [0, limit), no wrap."""
+    return S.and_(S.ule(n, limit), S.ule(off, S.sub(limit, n)))
+
+
+class Over:
+    """derived.c: functions made of calls of the entry points (str_memchr and
+    so on, each a jump through its slot of str_table, which holds one of the
+    configurations' implementations, every one proved by the slot's spec)
+    and a few loads and stores of their own, no loop. A call is taken by its
+    slot's contract: its arguments checked, its answer a fresh term with
+    what the spec says of it instanced at the objects' stops (strlen's a NUL
+    at or before any NUL of the string; memchr's at or before the bounded
+    object's stop, and without one the stop at n), memcpy's bytes the
+    destination's memory from then on; malloc's answer null or an object of
+    the size asked, apart. A jump to one (a tail call) is checked for its
+    arguments and the state it leaves; the rest is the callee's. The objects
+    are regions of their own, apart, in user space; the function's own loads
+    and stores inside what each allows; at the return the answer and every
+    object's memory byte by byte (at a free offset) what the function's
+    definition says."""
+    unroll = 1
+
+    @property
+    def base(self):  # what a loop's generalization asks first: a derived function has none
+        raise Failure('a loop in a function of derived.c')
+
+    def __init__(self, maxlen, induct):
+        self.maxlen, self.induct = maxlen, induct
+        self.objs, self.regions, self.assume = [], [], []
+        self.calls = 0
+        self.alloc = self.msize = None
+        self.inset = var('inset', 256)
+
+    def setup(self, a, align):
+        self.case = a
+        params = self.objects(a)
+        self.assume.append(S.not_(member(self.inset, const(8, 0))))
+        return params, self.assume
+
+    # ---- the objects
+
+    def obj(self, name, base=None):
+        o = Obj(name, var(name, 64) if base is None else base, S.mem_var(name + '_mem'), len(self.regions))
+        self.objs.append(o)
+        self.regions.append((o.base, o.arr))
+        return o
+
+    def place(self, o, extent, nullable=False):
+        """o's bytes [0, extent) in user space (nullable: or o null)."""
+        top = const(64, USER_HI)
+        inside = S.and_(S.ule(const(64, USER_LO), o.base), S.ult(o.base, top), S.ult(extent, const(64, USER_HI - USER_LO)), S.ule(S.add(o.base, extent), top))
+        self.assume.append(S.or_(S.is_zero(o.base), inside) if nullable else inside)
+
+    def string(self, name, writable=False, base=None, nullable=False):
+        """A string: a NUL at its stop (any NUL), the bytes up to it readable (and writable)."""
+        o = self.obj(name, base)
+        o.stop = var(name + '_z', 64)
+        o.read = S.add(o.stop, const(64, 1))
+        o.write = o.read if writable else const(64, 0)
+        self.assume += [S.is_zero(S.select(o.arr, o.stop)), S.ult(o.stop, const(64, USER_HI - USER_LO))]
+        self.place(o, o.read, nullable)
+        return o
+
+    def bounded(self, name, n, write=None):
+        """memchr's object: readable up to its stop, a NUL before n (any) or n; write: the bytes that may be written."""
+        o = self.obj(name)
+        o.n, o.stop = n, var(name + '_z', 64)
+        o.read = S.ite(S.eq(o.stop, n), n, S.add(o.stop, const(64, 1)))
+        o.write = const(64, 0) if write is None else write
+        self.assume.append(S.or_(S.and_(S.ult(o.stop, n), S.is_zero(S.select(o.arr, o.stop))), S.eq(o.stop, n)))
+        self.place(o, o.read if write is None else S.ite(S.ult(o.read, write), write, o.read))
+        return o
+
+    def buffer(self, name, n, readable=False):
+        """n bytes, written (or read)."""
+        o = self.obj(name)
+        o.write = n
+        o.read = n if readable else const(64, 0)
+        self.place(o, n)
+        return o
+
+    def cell(self, name):
+        """A char *, read and written: its value the 8 bytes of its memory as a
+        load has them (the term a string's base can be)."""
+        o = self.obj(name)
+        o.value = X.to_bv([S.select(o.arr, const(64, i)) for i in range(8)])
+        o.read = o.write = const(64, 8)
+        self.place(o, o.read)
+        return o
+
+    def allocation(self):
+        """What malloc gives: null, or the size asked of its own (the region set aside)."""
+        self.alloc = self.obj('m')
+        return self.alloc
+
+    def owner_of(self, addr):
+        for o in self.objs:
+            off = X.offset_from(addr, o.base)
+            if off is not None:
+                return o, off
+        return None, None
+
+    def write_of(self, o):
+        return self.msize if o is self.alloc else o.write
+
+    def early(self, a, n):
+        """The function's own load past what its object lets be read."""
+        o, off = self.owner_of(a)
+        if o is None:
+            raise Failure('a load of no object: %r' % a)
+        return S.not_(fits(off, const(64, n), o.read))
+
+    def early_store(self, e):
+        a, nb, rip, c, lanes = e
+        nb = nb if isinstance(nb, S.T) else const(64, nb)
+        o, off = self.owner_of(a)
+        if o is None:
+            raise Failure('a store to no object at %#x' % rip)
+        w = self.write_of(o)
+        return S.and_(c, S.not_(fits(off, nb, w if w is not None else const(64, 0))))
+
+    # ---- the callees by their contracts
+
+    def contracts(self, img, entry):
+        return {t: getattr(self, 'c_' + n.replace('str_', '', 1)) for t, n in named_targets(img, entry, DERIVED_ENTRIES).items()}
+
+    def log(self, st, *entry):
+        st.log = getattr(st, 'log', ()) + (entry,)
+
+    def calls_of(self, st, name):
+        return [e for e in getattr(st, 'log', ()) if e[0] == name]
+
+    def one(self, st, name):
+        got = self.calls_of(st, name)
+        if len(got) != 1:
+            raise Failure('%d calls of %s on a path' % (len(got), name))
+        return got[0]
+
+    def returns(self, st, rax):
+        """The state after a call: rax the answer, the caller-saved registers unknown."""
+        self.calls += 1
+        X.call_return(st, rax, 'c%d_' % self.calls)
+
+    def tail(self, st):
+        return st.gpr['rsp'] is X.RSP0
+
+    def untouched(self, st, o, what):
+        if st.regions[o.k][1] is not o.arr:
+            raise Failure('%s of %s after stores to it' % (what, o.name))
+
+    def c_memchr(self, prover, st):
+        """memchr(p, 0, n) of a bounded object from its start, a way each: p +
+        r, r < n, a NUL there, none before (r at or before the stop); null, no
+        NUL in the n bytes (the stop at n)."""
+        p, c, n = st.gpr['rdi'], S.extract(st.gpr['rsi'], 7, 0), st.gpr['rdx']
+        o, off = self.owner_of(p)
+        if o is None or o.n is None or self.tail(st):
+            raise Failure('memchr of no bounded object, or as a tail call: %r' % p)
+        self.untouched(st, o, 'memchr')
+        prover.prove(st, [('memchr is given %s, a NUL and its n' % o.name, [S.or_(S.not_(S.is_zero(off)), S.not_(S.is_zero(c)), S.not_(S.eq(n, o.n)))])], self.show())
+        r = var('at%d' % (self.calls + 1), 64)
+        none = st.copy()  # the other way, walked later: no NUL in the n bytes, null
+        none.pc.append(S.eq(o.stop, n))
+        self.log(none, 'memchr', o, S.FALSE, r)
+        st.pc += [S.ult(r, n), S.is_zero(S.select(o.arr, r)), S.ule(r, o.stop)]
+        self.log(st, 'memchr', o, S.TRUE, r)
+        self.returns(st, S.add(p, r))
+        self.returns(none, const(64, 0))
+        prover.works[-1].append(none)
+
+    def c_strlen(self, prover, st):
+        """strlen(p), p at or before its string's NUL: L, a NUL at p + L, none
+        before it (at or before that NUL)."""
+        p = st.gpr['rdi']
+        o, off = self.owner_of(p)
+        if o is None or o.stop is None or o.n is not None or self.tail(st):
+            raise Failure('strlen of no string, or as a tail call: %r' % p)
+        self.untouched(st, o, 'strlen')
+        prover.prove(st, [('strlen is given %s at or before its NUL' % o.name, [S.not_(S.ule(off, o.stop))])], self.show())
+        L = var('len%d' % (self.calls + 1), 64)
+        st.pc += [S.is_zero(S.select(o.arr, S.add(off, L))), S.ule(L, S.sub(o.stop, off))]
+        self.log(st, 'strlen', o, off, L)
+        self.returns(st, L)
+
+    def span_call(self, prover, st, name, stops):
+        p, setp = st.gpr['rdi'], st.gpr['rsi']
+        o, off = self.owner_of(p)
+        if o is None or o.stop is None or o.n is not None or self.tail(st):
+            raise Failure('%s of no string, or as a tail call: %r' % (name, p))
+        self.untouched(st, o, name)
+        prover.prove(st, [('%s is given %s at or before its NUL' % (name, o.name), [S.not_(S.ule(off, o.stop))]),
+                          ('%s is given the set' % name, [S.not_(S.eq(setp, self.set.base))])], self.show())
+        r = var('span%d' % (self.calls + 1), 64)
+        st.pc += [S.ule(r, S.sub(o.stop, off)), stops(S.select(o.arr, S.add(off, r)))]
+        self.log(st, name, o, off, r)
+        self.returns(st, r)
+
+    def c_strspn(self, prover, st):
+        """strspn(p, set): r, p's bytes before p + r in the set (no NUL among
+        them: r at or before the NUL), the one there not."""
+        self.span_call(prover, st, 'strspn', lambda b: S.not_(member(self.inset, b)))
+
+    def c_strcspn(self, prover, st):
+        """strcspn(p, set): r, p's bytes before p + r neither in the set nor
+        the NUL, the one there either."""
+        self.span_call(prover, st, 'strcspn', lambda b: S.or_(S.is_zero(b), member(self.inset, b)))
+
+    def c_memcpy(self, prover, st):
+        """memcpy(d, s, n), d's object and s's apart: d's n bytes from then
+        on s's (as s's memory has them at the call); d."""
+        d, s, n = st.gpr['rdi'], st.gpr['rsi'], st.gpr['rdx']
+        od, xd = self.owner_of(d)
+        os_, xs = self.owner_of(s)
+        if od is None or os_ is None or od is os_:
+            raise Failure('memcpy between %r and %r' % (d, s))
+        w = self.write_of(od)
+        out = [('memcpy writes inside what %s allows' % od.name, [S.not_(fits(xd, n, w if w is not None else const(64, 0)))]),
+               ('memcpy reads inside what %s allows' % os_.name, [S.not_(fits(xs, n, os_.read))])]
+        if self.tail(st):
+            self.log(st, 'memcpy', od, xd, os_, xs, n)
+            return tail_call(self, prover, st, out + self.tail_args(st, 'memcpy'))
+        prover.prove(st, out, self.show())
+        x = var('xm%d' % (self.calls + 1), 64)
+        old, src = st.regions[od.k][1], st.regions[os_.k][1]
+        st.regions[od.k] = (od.base, S.lam(x, S.ite(X.within(x, xd, n), S.select(src, S.add(xs, S.sub(x, xd))), S.select(old, x))))
+        self.log(st, 'memcpy', od, xd, os_, xs, n)
+        self.returns(st, d)
+
+    def tail_only(self, prover, st, name):
+        if not self.tail(st):
+            raise Failure('%s called, not jumped to' % name)
+        return tail_call(self, prover, st, self.tail_args(st, name))
+
+    def c_memmove(self, prover, st):
+        return self.tail_only(prover, st, 'memmove')
+
+    def c_memset(self, prover, st):
+        return self.tail_only(prover, st, 'memset')
+
+    def c_memcmp(self, prover, st):
+        return self.tail_only(prover, st, 'memcmp')
+
+    def tail_args(self, st, name):
+        raise Failure('a jump to %s' % name)
+
+    def c_malloc(self, prover, st):
+        """malloc(n): null, or an object of n bytes of its own."""
+        if self.alloc is None or self.tail(st) or self.calls_of(st, 'malloc'):
+            raise Failure('malloc where the spec has none')
+        n, m = st.gpr['rdi'], self.alloc.base
+        self.msize = n
+        st.pc.append(S.or_(S.is_zero(m), S.and_(S.ule(const(64, USER_LO), m), S.ult(n, const(64, USER_HI - USER_LO)), S.ule(S.add(m, n), const(64, USER_HI)))))
+        self.log(st, 'malloc', n)
+        self.returns(st, m)
+
+    # ---- at the return
+
+    def final(self, st, o):
+        return st.regions[o.k][1]
+
+    def memory_is(self, st, o, want, what, upto=None):
+        """o's bytes at the return want(x) at every offset x (below upto)."""
+        x = var('x_' + o.name, 64)
+        bad = S.not_(S.eq(S.select(self.final(st, o), x), want(x)))
+        return [(what, [S.and_(S.ult(x, upto), bad) if upto is not None else bad])]
+
+    def unchanged(self, st, *changed):
+        out = []
+        for o in self.objs:
+            if o not in changed and o is not self.alloc and self.final(st, o) is not o.arr:
+                out += self.memory_is(st, o, lambda x, o=o: S.select(o.arr, x), '%s unchanged' % o.name)
+        return out
+
+    def answer(self, st, want, what):
+        return [(what, [S.not_(S.eq(st.gpr['rax'], want))])]
+
+    def show(self):
+        return [o.base for o in self.objs] + [o.stop for o in self.objs if o.stop is not None]
+
+
+class OverTail(Over):
+    """bcmp, bcopy, bzero, explicit_bzero: a jump to an entry point with the
+    arguments the definition gives it (bcmp(a, b, n) memcmp's, its sign
+    unasked; bcopy(s, d, n) memmove(d, s, n); bzero(d, n) memset(d, 0, n))."""
+    callee = None
+    arity = 3
+
+    def objects(self, a):
+        self.p = [var('a%d' % i, 64) for i in range(self.arity)]
+        return self.p
+
+    def jump_ok(self, st):
+        return S.and_(*[S.eq(st.gpr[r], w) for r, w in zip(('rdi', 'rsi', 'rdx'), self.p)])
+
+    def tail_args(self, st, name):
+        if name != self.callee:
+            raise Failure('a jump to %s, not %s' % (name, self.callee))
+        return [('the jump to %s with the arguments of the definition' % name, [S.not_(self.jump_ok(st))])]
+
+    def obligations(self, st):
+        raise Failure('a return, not a jump to %s' % self.callee)
+
+    def show(self):
+        return self.p
+
+
+class OverBcmp(OverTail):
+    callee = 'memcmp'
+
+
+class OverBcopy(OverTail):
+    callee = 'memmove'
+
+    def jump_ok(self, st):
+        return S.and_(S.eq(st.gpr['rdi'], self.p[1]), S.eq(st.gpr['rsi'], self.p[0]), S.eq(st.gpr['rdx'], self.p[2]))
+
+
+class OverBzero(OverTail):
+    callee = 'memset'
+    arity = 2
+
+    def jump_ok(self, st):
+        return S.and_(S.eq(st.gpr['rdi'], self.p[0]), S.is_zero(S.extract(st.gpr['rsi'], 7, 0)), S.eq(st.gpr['rdx'], self.p[1]))
+
+
+class OverMempcpy(Over):
+    """mempcpy(d, s, n): d + n; d's n bytes s's, nothing else written."""
+
+    def objects(self, a):
+        self.n = var('n', 64)
+        self.d, self.s = self.buffer('d', self.n), self.buffer('s', self.n, readable=True)
+        return [self.d.base, self.s.base, self.n]
+
+    def obligations(self, st):
+        self.one(st, 'memcpy')
+        want = lambda x: S.ite(S.ult(x, self.n), S.select(self.s.arr, x), S.select(self.d.arr, x))  # noqa: E731
+        return (self.answer(st, S.add(self.d.base, self.n), 'the answer d + n') + self.memory_is(st, self.d, want, 'd: s\'s n bytes, nothing else')
+                + self.unchanged(st, self.d)), self.show()
+
+
+class OverStrnlen(Over):
+    """strnlen(s, n): the offset of s's first NUL before n, else n (memchr's
+    answer from s, or n without one); nothing written."""
+
+    def objects(self, a):
+        self.n = var('n', 64)
+        self.s = self.bounded('s', self.n)
+        return [self.s.base, self.n]
+
+    def obligations(self, st):
+        _, _, f, r = self.one(st, 'memchr')
+        return self.answer(st, S.ite(f, r, self.n), 'the answer the first NUL\'s offset, or n') + self.unchanged(st), self.show()
+
+
+class OverStrncat(Over):
+    """strncat(d, s, n): d; s's bytes before its first NUL, n at most (k:
+    memchr's answer from s, or n), copied to d's first NUL (L: strlen's
+    answer) and a NUL after them, nothing else written. d a string with room
+    past any NUL of its for any stop of s and a NUL (its capacity cap), s
+    bounded by n."""
+
+    def objects(self, a):
+        self.n, self.cap = var('n', 64), var('cap', 64)
+        self.d, self.s = self.string('d'), self.bounded('s', self.n)
+        self.d.write = self.cap
+        self.assume.append(S.ule(S.add(S.add(self.d.stop, self.s.stop), const(64, 1)), self.cap))
+        self.place(self.d, self.cap)
+        return [self.d.base, self.s.base, self.n]
+
+    def obligations(self, st):
+        L = self.one(st, 'strlen')[3]
+        _, _, f, r = self.one(st, 'memchr')
+        k = S.ite(f, r, self.n)
+        want = lambda x: S.ite(X.within(x, L, k), S.select(self.s.arr, S.sub(x, L)),  # noqa: E731
+                               S.ite(S.eq(x, S.add(L, k)), const(8, 0), S.select(self.d.arr, x)))
+        return (self.answer(st, self.d.base, 'the answer d') + self.memory_is(st, self.d, want, 'd: s\'s k bytes at its NUL and a NUL, nothing else')
+                + self.unchanged(st, self.d)), self.show()
+
+
+class OverStrlcpy(Over):
+    """strlcpy(d, s, n): s's length (L: strlen's answer); with n > 0 d's
+    first k = min(L, n - 1) bytes s's and a NUL after them, nothing else
+    written. d n bytes."""
+
+    def objects(self, a):
+        self.n = var('n', 64)
+        self.d, self.s = self.buffer('d', self.n), self.string('s')
+        return [self.d.base, self.s.base, self.n]
+
+    def obligations(self, st):
+        L = self.one(st, 'strlen')[3]
+        last = S.sub(self.n, const(64, 1))
+        k = S.ite(S.ult(L, last), L, last)
+        want = lambda x: S.ite(S.is_zero(self.n), S.select(self.d.arr, x), S.ite(S.ult(x, k), S.select(self.s.arr, x),  # noqa: E731
+                               S.ite(S.eq(x, k), const(8, 0), S.select(self.d.arr, x))))
+        return (self.answer(st, L, 'the answer s\'s length') + self.memory_is(st, self.d, want, 'd: s\'s first k bytes and a NUL, nothing else')
+                + self.unchanged(st, self.d)), self.show()
+
+
+class OverStrlcat(Over):
+    """strlcat(d, s, n): without a NUL in d's n bytes (memchr's answer null)
+    n + s's length, nothing written; else at d's first NUL r (memchr's) s's
+    first k = min(L, n - r - 1) bytes and a NUL, nothing else written, and
+    r + L (L: strlen's answer). d bounded by n, its n bytes writable."""
+
+    def objects(self, a):
+        self.n = var('n', 64)
+        self.d, self.s = self.bounded('d', self.n, write=self.n), self.string('s')
+        return [self.d.base, self.s.base, self.n]
+
+    def obligations(self, st):
+        _, _, f, r = self.one(st, 'memchr')
+        L = self.one(st, 'strlen')[3]
+        room = S.sub(S.sub(self.n, r), const(64, 1))
+        k = S.ite(S.ult(L, room), L, room)
+        want = lambda x: S.ite(f, S.ite(X.within(x, r, k), S.select(self.s.arr, S.sub(x, r)),  # noqa: E731
+                                        S.ite(S.eq(x, S.add(r, k)), const(8, 0), S.select(self.d.arr, x))), S.select(self.d.arr, x))
+        return (self.answer(st, S.add(S.ite(f, r, self.n), L), 'the answer d\'s length (n at most) and s\'s')
+                + self.memory_is(st, self.d, want, 'd: s\'s first k bytes and a NUL at its NUL, nothing else') + self.unchanged(st, self.d)), self.show()
+
+
+class OverStrpbrk(Over):
+    """strpbrk(s, set): s + r at the first byte of s in the set (r: strcspn's
+    answer), null where that is s's NUL; nothing written."""
+
+    def objects(self, a):
+        self.s, self.set = self.string('s'), self.string('set')
+        return [self.s.base, self.set.base]
+
+    def obligations(self, st):
+        r = self.one(st, 'strcspn')[3]
+        at = S.select(self.s.arr, r)
+        return self.answer(st, S.ite(S.is_zero(at), const(64, 0), S.add(self.s.base, r)), 'the answer the first byte in the set, or null') + \
+            self.unchanged(st), self.show()
+
+
+class OverStrdup(Over):
+    """strdup(s): null when malloc's answer is; else a jump to memcpy(m, s,
+    L + 1), m malloc's answer for L + 1 bytes (L: strlen's), which copies s
+    and its NUL there and gives m."""
+
+    def objects(self, a):
+        self.s = self.string('s')
+        self.allocation()
+        return [self.s.base]
+
+    def tail_args(self, st, name):
+        if name != 'memcpy':
+            raise Failure('a jump to %s' % name)
+        n1 = S.add(self.one(st, 'strlen')[3], const(64, 1))
+        size = self.one(st, 'malloc')[1]
+        ok = S.and_(S.eq(st.gpr['rdi'], self.alloc.base), S.eq(st.gpr['rsi'], self.s.base), S.eq(st.gpr['rdx'], n1))
+        return [('malloc asked for s and its NUL', [S.not_(S.eq(size, n1))]), ('the jump to memcpy(m, s, L + 1)', [S.not_(ok)]),
+                ('m not null there', [S.is_zero(self.alloc.base)])]
+
+    def obligations(self, st):
+        self.one(st, 'malloc')
+        return (self.answer(st, const(64, 0), 'the answer null') + [('malloc\'s answer null there', [S.not_(S.is_zero(self.alloc.base))])]
+                + self.unchanged(st)), self.show()
+
+
+class OverStrndup(Over):
+    """strndup(s, n): l memchr's answer from s, or n; null when malloc's
+    answer (for l + 1 bytes) is; else m with s's l bytes and a NUL."""
+
+    def objects(self, a):
+        self.n = var('n', 64)
+        self.s = self.bounded('s', self.n)
+        self.allocation()
+        return [self.s.base, self.n]
+
+    def obligations(self, st):
+        _, _, f, r = self.one(st, 'memchr')
+        l1 = S.add(S.ite(f, r, self.n), const(64, 1))
+        out = [('malloc asked for l + 1 bytes', [S.not_(S.eq(self.one(st, 'malloc')[1], l1))])]
+        if not self.calls_of(st, 'memcpy'):
+            return (out + self.answer(st, const(64, 0), 'the answer null') + [('malloc\'s answer null there', [S.not_(S.is_zero(self.alloc.base))])]
+                    + self.unchanged(st)), self.show()
+        l = S.sub(l1, const(64, 1))
+        want = lambda x: S.ite(S.ult(x, l), S.select(self.s.arr, x), const(8, 0))  # noqa: E731
+        return (out + self.answer(st, self.alloc.base, 'the answer m') + self.memory_is(st, self.alloc, want, 'm: s\'s l bytes and a NUL', upto=l1)
+                + self.unchanged(st)), self.show()
+
+
+class TokenSpec(Over):
+    """strsep, strtok_r and strtok: past a token's start t in string o,
+    strcspn's answer r2 from there: at t + r2 a NUL and the char * cell
+    t + r2 + 1 when the byte there is in the set; else nothing written and
+    the cell null."""
+
+    def token_end(self, st, o, t, cellv):
+        _, _, off, r2 = self.one(st, 'strcspn')
+        e = S.add(off, r2)
+        cut = S.not_(S.is_zero(S.select(o.arr, e)))
+        want = lambda x: S.ite(S.and_(cut, S.eq(x, e)), const(8, 0), S.select(o.arr, x))  # noqa: E731
+        return ([('strcspn from the token\'s start', [S.not_(S.eq(off, t))])]
+                + self.memory_is(st, o, want, 'the token\'s end a NUL when a byte of the set is there, nothing else')
+                + [('the cell past the token\'s end, else null', [S.not_(S.eq(cellv, S.ite(cut, S.add(S.add(o.base, e), const(64, 1)), const(64, 0))))])])
+
+    def cell_now(self, st, c):
+        return X.to_bv([S.select(self.final(st, c), const(64, i)) for i in range(8)])
+
+
+class OverStrsep(TokenSpec):
+    """strsep(sp, sep): *sp (v); null and nothing written when v is null;
+    else the token from v ends where TokenSpec says, the cell *sp."""
+
+    def objects(self, a):
+        self.sp = self.cell('sp')
+        self.v = self.sp.value
+        self.s, self.set = self.string('s', writable=True, base=self.v, nullable=True), self.string('set')
+        return [self.sp.base, self.set.base]
+
+    def obligations(self, st):
+        out = self.answer(st, self.v, 'the answer *sp')
+        if not self.calls_of(st, 'strcspn'):
+            return out + [('*sp null there', [S.not_(S.is_zero(self.v))])] + self.unchanged(st), self.show()
+        return out + self.token_end(st, self.s, const(64, 0), self.cell_now(st, self.sp)) + self.unchanged(st, self.s, self.sp), self.show()
+
+
+class OverStrtokR(TokenSpec):
+    """strtok_r(s, sep, last) in two cases (the class): 0, s a string; 1, s
+    null and the string *last's (v; null: none). With none: null, nothing
+    written. Past strspn's answer r1 from the string's start (its bytes the
+    set's) the NUL: null and the cell null, nothing else written; else the
+    token there, its end and the cell as TokenSpec says."""
+
+    def objects(self, a):
+        self.last = self.state_cell()
+        self.v = self.state_value()
+        if a == 0:
+            self.s = self.string('s', writable=True)
+            first = self.s.base
+        else:
+            self.s = self.string('s', writable=True, base=self.v, nullable=True)
+            first = const(64, 0)
+        self.set = self.string('set')
+        return [first, self.set.base] + ([self.last.base] if self.last is not None else [])
+
+    def state_cell(self):
+        return self.cell('last')
+
+    def state_value(self):
+        return self.last.value
+
+    def state_now(self, st):
+        return self.cell_now(st, self.last)
+
+    def obligations(self, st):
+        cellv = self.state_now(st)
+        if not self.calls_of(st, 'strspn'):
+            if self.case == 0:
+                raise Failure('a string and no strspn')
+            return (self.answer(st, const(64, 0), 'the answer null') + [('*last null there', [S.not_(S.is_zero(self.v))]),
+                                                                       ('the cell unchanged', [S.not_(S.eq(cellv, self.v))])]
+                    + self.unchanged(st)), self.show()
+        _, _, off1, r1 = self.one(st, 'strspn')
+        out = [('strspn from the string\'s start', [S.not_(S.is_zero(off1))])]
+        if not self.calls_of(st, 'strcspn'):
+            return (out + self.answer(st, const(64, 0), 'the answer null past the set\'s bytes at the NUL')
+                    + [('the NUL there', [S.not_(S.is_zero(S.select(self.s.arr, r1)))]), ('the cell null', [S.not_(S.is_zero(cellv))])]
+                    + self.unchanged(st, self.last)), self.show()
+        return (out + self.answer(st, S.add(self.s.base, r1), 'the answer the token past the set\'s bytes')
+                + [('not at the NUL', [S.is_zero(S.select(self.s.arr, r1))])] + self.token_end(st, self.s, r1, cellv)
+                + self.unchanged(st, self.s, self.last)), self.show()
+
+
+class OverStrtok(OverStrtokR):
+    """strtok(s, sep): strtok_r's with strtok's own cell, the static
+    strtok_last of its object (its bytes the memory's at that address)."""
+
+    def state_cell(self):
+        self.addr = self.image.symbols['strtok_last']
+        self.cellobj = Obj('strtok_last', const(64, self.addr), None, None)
+        self.cellobj.read = self.cellobj.write = const(64, 8)
+        return None
+
+    def state_value(self):
+        return X.to_bv([S.select(S.mem_var('M'), self.at(i)) for i in range(8)])
+
+    def at(self, i):
+        return const(64, self.addr + i)
+
+    def owner_of(self, addr):
+        o, off = Over.owner_of(self, addr)
+        if o is None and S.is_const(addr) and self.addr <= addr.val < self.addr + 8:
+            return self.cellobj, const(64, addr.val - self.addr)
+        return o, off
+
+    def state_now(self, st):
+        return X.to_bv([S.select(st.mem, self.at(i)) for i in range(8)])
+
+
 SPECS = {'strlen': Strlen, 'strlen_tail': StrlenTail, 'memchr': Memchr, 'memchr_large': MemchrLarge, 'memset': Fill, 'fill_large': FillLarge, 'memcpy': Copy,
-         'memmove': Move, 'copy_large': CopyLarge, 'memcmp': Compare, 'memcmp_large': MemcmpLarge, 'strcmp': StrCompare, 'strcmp_tail': StrCompare, 'strcpy': StrCopy, 'strcpy_long': StrCopyLong, 'strcat': StrCat, 'strspn': Span, 'strcspn': Cspan, 'strspn_long': SpanLong, 'strcspn_long': CspanLong, 'truffle_scan': TruffleScan, 'truffle_scan32': TruffleScan32}
+         'memmove': Move, 'copy_large': CopyLarge, 'memcmp': Compare, 'memcmp_large': MemcmpLarge, 'strcmp': StrCompare, 'strcmp_tail': StrCompare, 'strcpy': StrCopy, 'strcpy_long': StrCopyLong, 'strcat': StrCat, 'strspn': Span, 'strcspn': Cspan, 'strspn_long': SpanLong, 'strcspn_long': CspanLong, 'truffle_scan': TruffleScan, 'truffle_scan32': TruffleScan32,
+         'bcmp': OverBcmp, 'bcopy': OverBcopy, 'bzero': OverBzero, 'explicit_bzero': OverBzero, 'mempcpy': OverMempcpy, 'strnlen': OverStrnlen,
+         'strncat': OverStrncat, 'strlcpy': OverStrlcpy, 'strlcat': OverStrlcat, 'strpbrk': OverStrpbrk, 'strsep': OverStrsep, 'strtok_r': OverStrtokR,
+         'strtok': OverStrtok, 'strdup': OverStrdup, 'strndup': OverStrndup}
 
 
 def contract_stops(spec, img, entry):
@@ -3014,6 +3635,8 @@ class Prover:
         self.unroll = getattr(self.spec, 'unroll', 1)
         self.contracts = self.spec.contracts(self.mach.image, entry) if hasattr(self.spec, 'contracts') else {}
         st = X.fresh_state(entry, params, self.spec.regions, getattr(self.spec, 'aliases', ()))
+        if hasattr(self.spec, 'memory'):  # what the spec has in memory outside its regions (strtok's state)
+            st.mem = self.spec.memory(st.mem)
         st.front_lo = getattr(self.spec, 'front0', None)  # a precondition's: no stop before it
         if self.prefix:
             self.backs = X.backward_targets(self.mach.image, entry)
@@ -3098,6 +3721,12 @@ class Prover:
                     st.free = True
                 if st.steps > self.args.steps:
                     raise Failure('a path past %d instructions at %#x' % (self.args.steps, st.rip))
+                contract = self.contracts.get(st.rip)
+                if contract is not None:  # a callee the spec takes by its contract (proved on its own): no loop's head
+                    if contract(self, st):  # a tail call: the path ends with it
+                        closed = True
+                        break
+                    continue
                 if self.args.induct and st.rip in targets:
                     g = st.gen  # this loop's general state, or an enclosing one's (back from inside an inner loop)
                     while g is not None and g['head'] != st.rip:
@@ -3120,12 +3749,6 @@ class Prover:
                         # subtree (every way round, every way out) is explored, from that arrival (the base case)
                         closed = True
                         break
-                contract = self.contracts.get(st.rip)
-                if contract is not None:  # a callee the spec takes by its contract (proved on its own)
-                    if contract(self, st):  # a tail call: the path ends with it
-                        closed = True
-                        break
-                    continue
                 forks = self.shift_cases(st)
                 if forks:  # a shift by a register of a few values: a way per value, each shift by a constant
                     st = forks[0]
@@ -3243,6 +3866,7 @@ def main():
     total = [0, 0, 0]
     for a in classes:
         spec = SPECS[args.spec](args.max, args.induct)
+        spec.image = img
         if isinstance(spec, Span):
             spec.setmax = args.setmax
         solver = S.Solver(log=log)

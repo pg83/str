@@ -253,4 +253,15 @@ for spec in proof_targets.order():  # a callee's node before its caller's
         else:
             node = proof_node(name, out, [*base, *contract], callees, prio)
         proofs[(spec, config)] = node
+# derived.c's functions: one copy each, the configurations' proofs of the slots it calls its callees'
+for spec, func in proof_targets.DERIVED.items():
+    out = f"$(B)/proof/{spec}.txt"
+    callees = [proofs[(dep, config)] for dep in proof_targets.DERIVED_DEPS[spec] for config in proof_targets.configs(dep)]
+    base = ["--spec", spec, "--func", func, "--callee", *[c.outputs[0] for c in callees]]
+    if spec in proof_targets.DERIVED_CASES:
+        n = proof_targets.DERIVED_CASES[spec]
+        parts = [proof_node(f"{spec}_{k}", f"$(B)/proof/{spec}/{k}.txt", [*base, "--classes", str(n), "--align", str(k)], callees) for k in range(n)]
+        proofs[(spec, "all")] = proof_node(spec, out, ["--spec", spec, "--func", func, "--of", *[p.outputs[0] for p in parts]], parts)
+    else:
+        proofs[(spec, "all")] = proof_node(spec, out, base, callees)
 group("proof", proof_elf, proof_oracle, *proofs.values())

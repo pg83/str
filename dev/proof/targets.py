@@ -98,6 +98,19 @@ SAME = {
 # one (its table loop run out 31 times, each a scan loop of its own: hours).
 SETMAX = {(s, 'sse2'): 1 for s in ('strspn', 'strcspn', 'strspn_long', 'strcspn_long')}
 
+# derived.c: one copy for every configuration (it calls the entry points, so the table), its spec ->
+# its symbol; the slots' specs it takes by their contracts, each slot's implementation in every
+# configuration proved by them (strspn's and strcspn's: their short and their long sets)
+DERIVED = {s: 'str_' + s for s in ('bcmp', 'bcopy', 'bzero', 'explicit_bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat',
+                                   'strpbrk', 'strsep', 'strtok_r', 'strtok', 'strdup', 'strndup')}
+DERIVED_DEPS = {'bcmp': ('memcmp',), 'bcopy': ('memmove',), 'bzero': ('memset',), 'explicit_bzero': ('memset',), 'mempcpy': ('memcpy',),
+                'strnlen': ('memchr',), 'strncat': ('strlen', 'memchr', 'memcpy'), 'strlcpy': ('strlen', 'memcpy'),
+                'strlcat': ('memchr', 'strlen', 'memcpy'), 'strpbrk': ('strcspn', 'strcspn_long'), 'strsep': ('strcspn', 'strcspn_long'),
+                'strtok_r': ('strspn', 'strspn_long', 'strcspn', 'strcspn_long'), 'strtok': ('strspn', 'strspn_long', 'strcspn', 'strcspn_long'),
+                'strdup': ('strlen', 'memcpy'), 'strndup': ('memchr', 'memcpy')}
+DERIVED_CASES = {'strtok_r': 2, 'strtok': 2}  # the classes: s a string, or s null and the saved pointer's
+SLOT_SPECS = {'strspn': ('strspn', 'strspn_long'), 'strcspn': ('strcspn', 'strcspn_long')}  # a slot's specs, all of them its implementations'
+
 DEPS = {'strcat': ('strlen', 'strcpy', 'strcpy_long'), 'strcmp': ('strcmp_tail',), 'strcpy': ('strcpy_long',), 'truffle_scan32': ('truffle_scan',),
         'strlen': ('strlen_tail',), 'memchr': ('memchr_large',), 'memset': ('fill_large',), 'memcpy': ('copy_large',), 'memmove': ('copy_large',),
         'memcmp': ('memcmp_large',)}

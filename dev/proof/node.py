@@ -22,6 +22,7 @@ unless proved."""
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,59 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
+
+
+def table_slots():
+    """The slots of struct str_table, in common.h's order."""
+    text = (HERE.parent.parent / 'common.h').read_text()
+    body = text[text.index('struct str_table {'):]
+    return re.findall(r'\(\*(\w+)\)', body[:body.index('};')])
+
+
+def slot_implementations(img, k, nslots):
+    """The names of what every configuration's table holds in slot k (str_configs: a name, the needs
+    and their padding, then the table)."""
+    word = lambda at, n: int.from_bytes(bytes(img.byte(at + i) for i in range(n)), 'little')  # noqa: E731
+    stride = 16 + 8 * nslots
+    return [img.names.get(word(img.symbols['str_configs'] + stride * j + 16 + 8 * k, 8), '?')
+            for j in range(word(img.symbols['str_nconfigs'], 4))]
+
+
+def entry_slot(img, addr):
+    """The slot an entry point is a jump through (jmp [rip + str_table + 8 k]), or None."""
+    j = img.decode(addr)
+    o = j['ops'][0] if j['ops'] else None
+    if j['mnemonic'] != 'jmp' or o is None or o['kind'] != 'Memory' or not o['mem'].get('rip_rel'):
+        return None
+    k, r = divmod(j['offset'] + j['len'] + o['mem']['disp'] - img.symbols['str_table'], 8)
+    return k if r == 0 else None
+
+
+def derived_callees(img, spec, func, callees):
+    """derived.c's: each callee an entry point that jumps through its slot, every configuration's
+    implementation there proved by the slot's specs among the callees' proofs; malloc the C
+    library's, taken by its contract. The table the constructor installs (before it runs the
+    plain sse2 functions are there, no proof's)."""
+    import prove
+    import targets
+    proved = {}
+    for o in callees:
+        r = result_of(o)
+        if r and r.get('result') == 'proved':
+            proved.setdefault(r['func'], set()).add(r['spec'])
+    names = {a: n for n, a in img.symbols.items()}
+    slots, missing = table_slots(), []
+    for t in prove.contract_callees(spec, img, img.symbols[func]):
+        n = names.get(t, hex(t))
+        if n == 'malloc' and img.symbols.get('malloc') == t:
+            continue
+        k = entry_slot(img, t)
+        if k is None or k >= len(slots) or n != 'str_' + slots[k]:
+            missing.append('%s: not the jump through its slot' % n)
+            continue
+        for impl in slot_implementations(img, k, len(slots)):
+            missing += ['%s by %s' % (impl, x) for x in targets.SLOT_SPECS.get(slots[k], (slots[k],)) if x not in proved.get(impl, ())]
+    return missing
 
 
 def result_of(path):
@@ -64,7 +118,11 @@ def main():
     img = X.Image(args.elf)
 
     # every callee the spec takes by its contract proved on its own
-    if not args.of or args.same_as:
+    if not args.of and args.spec in __import__('targets').DERIVED:
+        missing = derived_callees(img, args.spec, args.func, args.callee)
+        if missing:
+            sys.exit('%s: callees without a proof among the dependencies: %s' % (args.func, ', '.join(missing)))
+    elif not args.of or args.same_as:
         proved = {}
         for o in args.callee:
             r = result_of(o)

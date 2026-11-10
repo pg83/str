@@ -320,6 +320,9 @@ strspn refuted "no match in the iteration" on that).
 | `strspn_long`, `strcspn_long` | the same for sets of more than 32 bytes, any length |
 | `truffle_scan` | for any two 16-byte tables and members 0 or 1, from any pointer, any stop past it: the answer `from - s` plus the offset of the first byte the tables say yes of (members) or no of; loads from from's page up to that byte's; nothing written |
 | `truffle_scan32` | count at most 32: the tables say of every byte whether it is one of the first count lanes of the two registers (or the NUL, for members), truffle_scan is handed them and from, s, members; its answer returned; nothing read but the frame |
+| `bcmp`, `bcopy`, `bzero`, `explicit_bzero` | a jump to memcmp, memmove, memset with the arguments of the definition |
+| `mempcpy`, `strnlen`, `strncat`, `strlcpy`, `strlcat`, `strdup`, `strndup` | the answer and every object's bytes the definition's, from the answers of the slots called (strlen's, memchr's) and malloc's (null or the size asked); nothing else written; the function's own loads and stores inside its objects |
+| `strpbrk`, `strsep`, `strtok_r`, `strtok` | the same past strspn's and strcspn's answers: the token, its end's NUL, the saved pointer; strtok_r and strtok in two classes (s a string; s null and the saved string, or none) |
 
 Every function and configuration is also checked for: aligned accesses
 (`movaps`, `movdqa`, legacy SSE memory operands) aligned; callee-saved
@@ -327,6 +330,33 @@ registers and `rsp` restored; rep movs with no backward overlap; every
 store to the stack and every push below the return address (the caller's
 frame is not the function's to write: a frame that reached it was
 refuted there).
+
+derived.c's functions (targets.DERIVED: one copy for every configuration)
+call the entry points, so the table. A call is taken by its slot's
+contract, the slot's spec, which every configuration's implementation there
+is proved by: node.py checks that the entry is the jump through its slot and
+that each configuration's table (str_configs, read from the ELF) holds a
+proved one there (before the constructor runs the table is the plain sse2
+functions, which no proof covers). The answer is a fresh term with what the
+spec says of it instanced at the objects' stops: strlen's a NUL at or
+before any NUL of its string, memchr's at or before the bounded object's
+stop, or none and the stop at n (two ways), strspn's and strcspn's at or
+before the NUL with the byte there out of the set (in it, or the NUL), the
+set a predicate of its 256 bytes; memcpy's bytes the destination's from
+then on, the objects apart and the ranges inside what each allows. A jump
+to an entry (bzero, bcmp, strdup's memcpy) is checked for its arguments.
+memmem and strstr are not proved: two-way's skips rest on the critical
+factorization theorem, which no invariant the walk finds carries; they are
+tested on every needle and haystack of small alphabets, plainly and past
+the scan's budget, and on periodic needles. Mutants (strlcpy's k to n,
+strnlen's answer + 1, strsep without its NUL, strdup's malloc a byte short,
+strncat's NUL a byte late, strtok_r's token a byte late, bzero with ones,
+strlcat's answer + 1) are refuted in a second each.
+
+A load from a writable section of the image is memory like any other
+(strtok's state), not the image's bytes; a callee's entry is taken by its
+contract before a loop's head is looked for (a second call of one callee is
+no loop).
 
 ## What the proofs rest on
 

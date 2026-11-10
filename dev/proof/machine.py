@@ -81,6 +81,9 @@ class State:
         s.pc, s.loads, s.aligned, s.stores, s.trace = list(self.pc), list(self.loads), list(self.aligned), list(self.stores), list(self.trace)
         s.requires = list(self.requires)
         s.fork, s.free = self.fork, self.free
+        for k, v in self.__dict__.items():  # what a spec keeps on the path (its callees' answers): the copy's too
+            if k not in s.__dict__:
+                s.__dict__[k] = v
         return s
 
 
@@ -382,7 +385,8 @@ def load(m, st, addr, n, rip, conds=None):
         if any(off + i not in st.stack for i in range(n)):
             raise Fault('a load of the stack not written at rsp0%+d' % off)
         return [st.stack[off + i] for i in range(n)]
-    if S.is_const(addr) and m.image.section_at(addr.val) is not None:
+    sec = m.image.section_at(addr.val) if S.is_const(addr) else None
+    if sec is not None and not sec.flags & 1:  # the image's constants; a writable one (strtok's state) is memory like any other
         return [const(8, m.image.byte(addr.val + i)) for i in range(n)]
     if st.cmem is not None:
         base, buf = st.cmem
