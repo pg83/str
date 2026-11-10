@@ -175,7 +175,7 @@ void *copy_huge_sse2(u8 *d, const u8 *s, size_t n);
 void *fill_huge_sse2(u8 *d, int c, size_t n);
 void *copy_huge_rep(u8 *d, const u8 *s, size_t n);   /* rep movsb: the ERMS hosts */
 void *fill_huge_rep(u8 *d, int c, size_t n);         /* rep stosb */
-void *memset_rep(void *, int, size_t);                 /* rep stosb for every size */
+void *memset_rep(void *, int, size_t);                 /* rep stosb below 128 bytes, memset_sse2 above */
 size_t strspn_table_sse2(const u8 *s, const u8 *set);
 size_t strcspn_table_sse2(const u8 *s, const u8 *set);
 size_t find_byte_or_nul_sse2(const u8 *s, u8 c);
