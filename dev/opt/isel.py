@@ -311,6 +311,7 @@ class ISel:
                         break
         # a p2i feeding adds that feed i2p: fine as address-only only in that chain
         self.addr_only = addr_only
+        self.stack_escapes = self.find_stack_escapes()
         # loads folded into their single user
         for b in fn.blocks:
             for i, op in enumerate(b.ops):
@@ -650,6 +651,32 @@ class ISel:
                     at = self.const_at.setdefault(t, [])
                     if v not in at:
                         at.append(v)
+
+    def find_stack_escapes(self):
+        """Whether the address of a stack object goes beyond the function's own accesses: a
+        call gets it, memory or the result keeps it. A tail call would leave the callee such
+        a pointer into a frame given up before the jump (str_host's &c to str_host_of)."""
+        derive = ('ptradd', 'i2p', 'p2i', 'add', 'sub', 'and', 'or', 'phi', 'select')
+        derived = {op.result for b in self.fn.blocks for op in b.ops if op.kind == 'alloca'}
+        changed = True
+        while changed:
+            changed = False
+            for b in self.fn.blocks:
+                for op in b.ops:
+                    if op.kind in derive and op.results and op.result not in derived and any(a in derived for a in op.args):
+                        derived.add(op.result)
+                        changed = True
+        for b in self.fn.blocks:
+            for op in b.ops + [b.term]:
+                for i, a in enumerate(op.args):
+                    if a not in derived or op.kind in derive or op.kind == 'icmp':
+                        continue
+                    if op.kind in ('load', 'store', 'memset') and i == 0 or op.kind == 'memcpy' and i < 2:
+                        continue
+                    if op.kind == 'vop' and op.attrs.get('memory') and self.vop_address_index(op) == i:
+                        continue
+                    return True
+        return False
 
     def const_reg(self, v):
         """The register holding the vector constant v where the block being selected is, or None."""
@@ -1403,7 +1430,7 @@ class ISel:
         # (a void function's last call: what the callee leaves in rax nobody reads)
         term = op.block.term
         body = op.block.ops
-        tail = (body[-1] is op and term.kind == 'ret' and (not term.args or term.args[0] is op.result))
+        tail = (body[-1] is op and term.kind == 'ret' and (not term.args or term.args[0] is op.result) and not self.stack_escapes)
         if callee.op.kind == 'sym':
             target = Sym(callee.op.attrs['name'])
         elif callee.op.kind == 'load' and callee.op in self.skip and callee not in self.vregs:
