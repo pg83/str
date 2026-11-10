@@ -304,7 +304,8 @@ static void suite(int full) {
 
             set[m] = 0;
 
-            for (size_t run = 0; run <= 4300; run += (run < 70 ? 1 : run < 600 ? 29 : 900)) { /* past pcmpistri's 2 KiB into the shuffle scan */
+            /* the runs reach past pcmpistri's 2 KiB (Zen: 1 KiB) into the shuffle scan */
+            for (size_t run = 0; run <= 4300; run += (run < 70 ? 1 : run < 600 ? 29 : 900)) {
                 for (size_t off = 0; off < 48; off += 5) {
                     unsigned char *s = a + 4096 + off;
 
