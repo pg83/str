@@ -52,6 +52,12 @@ cost, the minimum over the passes of four runs with the core's clock held
 at nominal; glibc's own time in parentheses. `dev/lab/libs.py` prints the
 table, each function's trace under it.
 
+A synthetic trace is not a program: its sizes are drawn call by call, where a
+program's come in peaks the branch predictor learns. So every change is
+measured on real programs too, by their cycles: pizdos's compiler compiling
+itself, its decoders and CPython, run by its loader with this library linked
+in (`dev/lab/pizdos.py`; dev/lab/README.md, "Real programs").
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

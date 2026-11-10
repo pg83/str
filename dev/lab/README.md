@@ -148,3 +148,60 @@ measures it at the start and the end with a chain of dependent adds.
 `out.csv.gz` has `prim,scenario,regime,n,align,kernel,min_ns,med_ns,iters,ghz,pmu`;
 `meta.json` the host, its features, glibc's and our dispatch, every kernel and
 its validation; `run.json` the commit, the binary's hash and the options.
+
+## Real programs: pizdos
+
+The workload above draws every call's size on its own from a smooth
+distribution; a program's sizes come in peaks at its call sites, and the
+branch predictor learns them there. The two disagree: evex512r's memset by
+rep stosb for every size ran the memset trace 0.80x on Zen 5 and lost 9% in
+file(1)'s decoder, whose 144-byte memset per magic entry takes rep stosb's
+slow start from 128 bytes. So real programs are a measurement of their own,
+`pizdos.py`, and a change of a first block or a slot is judged by both:
+
+```
+ix run lib/c bld/compiler bin/go/lang/25 bin/zstd -- python3 dev/lab/pizdos.py build head=HEAD new=work
+dev/lab/pizdos.py run --tag p-1                   # local, lab2, lab3 in parallel, 5 runs, the clock held
+dev/lab/pizdos.py report 'p-*'                    # per host and program: the base's cycles, the others' ratios
+dev/lab/pizdos.py build head=HEAD try=HEAD:evex512r.memset=memset_evex512   # slots replaced, no commit
+```
+
+pizdos (github.com/pizd0s/kernel, pinned in `pizdos.py`) is an OS whose
+processes are wasm modules; its loader wasm2o compiles them to x86-64 and
+links our library in, built in the convention of the modules' code
+(`strcc.py --abi wasm2o`), with the configuration `str_choose` picks for the
+host. A module's `memory.copy` and `memory.fill` (but those of a constant
+length up to 32 bytes, which the compiler expands) and lib/c's string
+functions are calls of ours. The programs:
+
+- **aot**: pizdos's compiler compiling itself, 6.7 G instructions; its
+  memmove and memset calls are mostly of 4 to 16 bytes, in peaks;
+- **im, pdf, djvu, svg, magic**: the decoders of pizdos's stand (decode
+  release 16) over its corpus of 89 files, magic (file(1)) 200 times over;
+- **py/NAME**: CPython, pizdos's python.o, on the stand's 14 benchmarks of
+  the interpreter.
+
+`build` unpacks pizdos into `.lab/pizdos/src/` and makes these inputs with
+pizdos's own `./build` (its cache by content: some two minutes the first
+time); then, for every `NAME=SPEC` (a revision, or `work`: the working tree,
+optionally `:CONFIG.SLOT=FN,...` replaced in `dispatch.c`), our `libstr.o`
+by that tree's own `strcc.py`, checked by its `tst/wasm2o.py` (revisions
+from a1c43d5 on), and a wasm2o embedding it. The programs are compiled once,
+by the first wasm2o: their code does not depend on our library, only their
+calls do. `run` ships the bundle (`.lab/pizdos/bundle/`, 135 MB) to each host
+once per content and calls every program with every wasm2o in turns, run
+after run, on one core with the clock held as for kbench. A call's figure is
+the whole process's cycles in user mode, its startup included (the same for
+every wasm2o), by `count.c`: the counters opened for the child before it
+execs, as perf stat does; the lab hosts have no perf. The output's digest
+must not depend on the wasm2o, and `report` warns when it does. Results:
+`.lab/T/<host>/pizdos.jsonl`, a line per call (cycles, instructions, wall,
+user and system seconds, the driver's own `time` of its work where it
+prints one, the digest); `run.json` with the bundle's id, pizdos's commit,
+and every wasm2o's revision, replaced slots and `libstr.o`'s sha256.
+
+A profile's share of a function is not its cost. With avx2's size trees
+instead of evex512r's masked first blocks, memmove's and memset's samples on
+the self-compile fell by half (1.86% of the cycles to 0.92%) and the
+program's cycles stayed the same (-0.07% over 13 runs each): the samples
+moved into the callers. The total is what this measures.
