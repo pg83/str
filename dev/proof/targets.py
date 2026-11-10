@@ -114,7 +114,7 @@ SLOT_SPECS = {'strspn': ('strspn', 'strspn_long'), 'strcspn': ('strcspn', 'strcs
 DEPS = {'strcat': ('strlen', 'strcpy', 'strcpy_long'), 'strcmp': ('strcmp_tail',), 'strcpy': ('strcpy_long',), 'truffle_scan32': ('truffle_scan',),
         'strlen': ('strlen_tail',), 'memchr': ('memchr_large',), 'memset': ('fill_large',), 'memcpy': ('copy_large',), 'memmove': ('copy_large',),
         'memcmp': ('memcmp_large',)}
-NO_KERNEL = set()  # every slot's copy takes its kernels' contracts (memset_rep's from 128 bytes on, through memset_sse2)
+NO_KERNEL = {('memset', 'evex512r')}  # memset_rep: rep stosb, no kernel
 TRUFFLE_DEPS = {'strspn': ('truffle_scan32',), 'strcspn': ('truffle_scan32', 'strlen')}
 
 # the order the ready proofs start in, the longest first (hours to tens of

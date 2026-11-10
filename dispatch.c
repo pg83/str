@@ -94,12 +94,19 @@ const struct str_config str_configs[] = {
         .memchr = memchr_evex512, .memchr_large = memchr_large_avx2,
     }},
     /* evex512 where the CPU starts a short rep stosb fast (FSRS: Zen 5 among
-       them): memset by rep stosb below 128 bytes, one path where the vector
+       them): memset by rep stosb for every size, one path where the vector
        memset's size tree mispredicts on the workload's fills. A Ryzen AI 9 HX
        370: the memset trace 0.80x (clock held) and 0.83x (turbo), the mixed
        trace 0.964x and 0.965x (dev/lab, 2026-11-04). Skylake-SP and Broadwell,
-       without FSRS, run it 1.4x and 1.03x slower. From 128 bytes on the short
-       start is gone, and memset_rep leaves those to memset_sse2. */
+       without FSRS, run it 1.4x and 1.03x slower. Against vectors from 128
+       bytes on (1318a0f, reverted): the memset trace 0.47 of glibc's time
+       against 0.63, the mixed 0.51 against 0.52; that path's branches
+       mispredict 0.34 times a call there, rep stosb has none. pizdos's
+       programs say otherwise (dev/lab/pizdos.py, 2026-11-10): file(1)'s
+       decoder, a 144-byte memset per magic entry, runs 9% slower with rep
+       stosb for every size, the other 19 programs the same. The workload
+       draws its sizes call by call; a program's come from its call sites,
+       where those branches are predicted. */
     {"evex512r", STR_SSE42 | STR_AVX2 | STR_AVX512 | STR_ZMM | STR_ERMS | STR_FSRS, {
         .memcpy = memcpy_evex512, .memmove = memmove_evex512, .memset = memset_rep, .memcmp = memcmp_evex512,
         .strlen = strlen_evex512, .strcpy = strcpy_evex, .strcat = strcat_evex, .strcmp = strcmp_evex,
