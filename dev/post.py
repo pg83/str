@@ -52,7 +52,7 @@ def optimize_all(path, obj, code, args, trampolines):
 
 def write(path, out, args, obj, code, clones, overrides, maps, exports):
     """Lay the object out again, with the configuration clones as new sections, and write it;
-    for every unit but dispatch also the twin laid out with the JCC padding, its global functions
+    for every unit but dispatch and derived also the twin laid out with the JCC padding, its global functions
     renamed name_jcc (the implementations the Skylake-SP configuration names). Returns the paths.
     maps collects {object: {section: {new offset: original offset}}} for --layout-map."""
     jcc = None if args.roundtrip else False
@@ -68,7 +68,7 @@ def write(path, out, args, obj, code, clones, overrides, maps, exports):
     elfout.write_model(obj, new, layouts, remap, None, new_sections, overrides, defined=exports.setdefault(new.name, []))
     maps[new.name] = {name: {str(v): k for k, v in lay.offsets.items()} for name, lay in layouts.items()}
     out_paths = [new]
-    if not args.roundtrip and unit_of(path) != 'dispatch':
+    if not args.roundtrip and unit_of(path) not in ('dispatch', 'derived'):
         exported = {s.name for s in obj.symbols if s.type == 'STT_FUNC' and s.bind == 'STB_GLOBAL' and s.section != 'UND'}
         data = sorted(s.name for s in obj.symbols if s.type == 'STT_OBJECT' and s.bind == 'STB_GLOBAL' and s.section != 'UND')
         if data:   # a unit is code only: its twin would define the data a second time

@@ -133,6 +133,25 @@ void *str_copy_huge(u8 *d, const u8 *s, size_t n);
 void *str_fill_huge(u8 *d, int c, size_t n);
 void *str_memchr_large(const u8 *s, u8 c, size_t n);
 
+/* derived.c: the functions made of the entry points above */
+int str_bcmp(const void *, const void *, size_t);
+void str_bcopy(const void *, void *, size_t);
+void str_bzero(void *, size_t);
+void str_explicit_bzero(void *, size_t);
+void *str_mempcpy(void *, const void *, size_t);
+size_t str_strnlen(const char *, size_t);
+char *str_strncat(char *, const char *, size_t);
+size_t str_strlcpy(char *, const char *, size_t);
+size_t str_strlcat(char *, const char *, size_t);
+char *str_strpbrk(const char *, const char *);
+char *str_strsep(char **, const char *);
+char *str_strtok_r(char *, const char *, char **);
+char *str_strtok(char *, const char *);
+char *str_strdup(const char *);
+char *str_strndup(const char *, size_t);
+void *str_memmem(const void *, size_t, const void *, size_t);
+char *str_strstr(const char *, const char *);
+
 /* sse2.c: every primitive, the baseline the table starts as */
 void *memcpy_sse2(void *, const void *, size_t);
 void *memmove_sse2(void *, const void *, size_t);

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+EXTERNAL = {'malloc'}  # the C library's: strdup's and strndup's allocation, the one name the archive takes from outside
 sys.path.insert(0, str(ROOT / 'dev'))
 os.environ['OPT_VERIFY'] = '1'
 import x86  # noqa: E402
@@ -74,7 +75,7 @@ def main():
                 if not 0 <= offset <= len(code) - 4:
                     fail('%s: relocation at %#x outside the code' % (fn.name, offset))
         print('%s: %d functions' % (unit, len(m.emitted())))
-    # the archive: its objects, their symbols resolved within it
+    # the archive: its objects, their symbols resolved within it (but EXTERNAL)
     defined, needed, where = {}, {}, {}
     for name, body in members(args.archive):
         obj = read_elf_bytes(body, name)
@@ -89,7 +90,7 @@ def main():
                 fail('%s: weak symbol %s' % (name, s.name))
         where[name] = obj
     for sym, users in sorted(needed.items()):
-        if sym not in defined:
+        if sym not in defined and sym not in EXTERNAL:
             fail('%s: undefined, wanted by %s' % (sym, ', '.join(sorted(users))))
     # the configurations' tables: every slot a copy that exists
     configs, initial, slots = read_configs(modules['dispatch'])

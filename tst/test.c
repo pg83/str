@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -57,6 +58,133 @@ static unsigned char *guard_pages(size_t pages) {
     CHECK(m != MAP_FAILED);
     CHECK(!mprotect(m + 4096, pages * 4096, PROT_READ | PROT_WRITE));
     return m + 4096;
+}
+
+/* The functions of derived.c are not slots: they call the entry points, so
+   through str_table, which main points at each table in turn. */
+#define D(f) (junk(), f)
+
+/* The first occurrence of n[0, nl) in h[0, hl), the reference for memmem and strstr. */
+static const unsigned char *naive_find(const unsigned char *h, size_t hl, const unsigned char *n, size_t nl) {
+    for (size_t i = 0; i + nl <= hl; i++) {
+        if (!memcmp(h + i, n, nl)) {
+            return h + i;
+        }
+    }
+
+    return 0;
+}
+
+/* derived.c on this table: each function at the sizes and offsets where the
+   primitives it calls change paths, quick enough for every mix. */
+static void derived_quick(unsigned char *a, unsigned char *b, unsigned char *ref) {
+    phase = "derived functions";
+
+    for (size_t n = 0; n <= 80; n++) {
+        for (size_t off = 0; off < 40; off += 13) {
+            unsigned char *s = a + 4096 + off, *d = b + 4096 + off * 3 % 40;
+            pattern(s, n, (unsigned)n);
+            s[n] = 0;
+
+            for (size_t lim = n > 2 ? n - 2 : 0; lim <= n + 2; lim++) {
+                CHECK(D(str_strnlen)((char *)s, lim) == (lim < n ? lim : n));
+                memset(d, 0x55, n + 8);
+                CHECK(D(str_strlcpy)((char *)d, (char *)s, lim) == n);
+                CHECK(lim == 0 ? d[0] == 0x55 : !memcmp(d, s, lim <= n ? lim - 1 : n) && d[lim <= n ? lim - 1 : n] == 0 && d[lim <= n ? lim : n + 1] == 0x55);
+                /* strlcat and strncat onto "xy" */
+                memset(d, 0x55, n + 8);
+                d[0] = 'x'; d[1] = 'y'; d[2] = 0;
+                size_t room = lim + 2, want = room <= 2 ? room + n : 2 + n;
+                CHECK(D(str_strlcat)((char *)d, (char *)s, room) == want);
+                size_t kept = room <= 2 ? 0 : (n < room - 3 ? n : room - 3);
+                CHECK(room <= 2 ? d[2] == 0 && d[3] == 0x55 : !memcmp(d + 2, s, kept) && d[2 + kept] == 0 && d[3 + kept] == 0x55);
+                memset(d, 0x55, n + 8);
+                d[0] = 'x'; d[1] = 0;
+                CHECK(D(str_strncat)((char *)d, (char *)s, lim) == (char *)d);
+                size_t took = lim < n ? lim : n;
+                CHECK(d[0] == 'x' && !memcmp(d + 1, s, took) && d[1 + took] == 0 && d[2 + took] == 0x55);
+            }
+
+            CHECK(D(str_mempcpy)(d, s, n) == d + n && !memcmp(d, s, n));
+            CHECK(!D(str_bcmp)(d, s, n));
+
+            if (n) {
+                d[n - 1] ^= 1;
+                CHECK(D(str_bcmp)(d, s, n) != 0);
+            }
+
+            memset(d, 0x55, n + 2);
+            D(str_bzero)(d, n);
+            CHECK((n == 0 || (d[0] == 0 && d[n - 1] == 0)) && d[n] == 0x55);
+            memset(d, 0x55, n + 2);
+            D(str_explicit_bzero)(d, n);
+            CHECK((n == 0 || (d[0] == 0 && d[n - 1] == 0)) && d[n] == 0x55);
+            D(str_bcopy)(s, d, n + 1);
+            CHECK(!memcmp(d, s, n + 1));
+            D(str_bcopy)(d, d + 1, n);   /* overlapping, forward */
+            CHECK(!memcmp(d + 1, s, n));
+            /* strpbrk, strsep and strtok_r on words of s split at the bytes of a set */
+            const char *set = n % 3 ? ",; " : "\x7f\x01";
+
+            for (size_t i = 0; i < n; i++) {
+                s[i] = (unsigned char)(i % 7 == 3 ? set[i % 2] : 'a' + i % 26);
+            }
+
+            CHECK(D(str_strpbrk)((char *)s, set) == strpbrk((char *)s, set));
+            memcpy(d, s, n + 1);
+            memcpy(ref, s, n + 1);
+            char *rest = (char *)d, *ref_rest = (char *)ref;
+
+            for (;;) {
+                char *t1 = D(str_strsep)(&rest, set), *t2 = strsep(&ref_rest, set);
+                CHECK((t1 == 0) == (t2 == 0));
+
+                if (!t1) {
+                    break;
+                }
+
+                CHECK(t1 - (char *)d == t2 - (char *)ref && !strcmp(t1, t2));
+            }
+
+            CHECK(!memcmp(d, ref, n + 1));
+            memcpy(d, s, n + 1);
+            memcpy(ref, s, n + 1);
+            char *save = 0, *ref_save = 0;
+            char *t1 = D(str_strtok_r)((char *)d, set, &save), *t2 = strtok_r((char *)ref, set, &ref_save);
+
+            for (;;) {
+                CHECK((t1 == 0) == (t2 == 0));
+
+                if (!t1) {
+                    break;
+                }
+
+                CHECK(t1 - (char *)d == t2 - (char *)ref && !strcmp(t1, t2));
+                t1 = D(str_strtok_r)(0, set, &save);
+                t2 = strtok_r(0, set, &ref_save);
+            }
+
+            CHECK(D(str_strtok_r)(0, set, &save) == 0);   /* and once more past the end */
+            CHECK(!memcmp(d, ref, n + 1));
+            /* memmem and strstr: the needle a piece of s, a byte changed or not */
+            pattern(s, n, (unsigned)n);
+            s[n] = 0;
+
+            for (size_t nl = 0; nl <= n && nl <= 9; nl++) {
+                size_t at = n - nl;
+                memcpy(d, s + at, nl);
+                d[nl] = 0;
+                CHECK(D(str_memmem)(s, n, d, nl) == naive_find(s, n, d, nl));
+                CHECK(D(str_strstr)((char *)s, (char *)d) == (char *)naive_find(s, n, d, nl));
+
+                if (nl) {
+                    d[nl - 1] ^= 0x20;
+                    CHECK(D(str_memmem)(s, n, d, nl) == naive_find(s, n, d, nl));
+                    CHECK(D(str_strstr)((char *)s, (char *)d) == (char *)naive_find(s, n, d, nl));
+                }
+            }
+        }
+    }
 }
 
 static void check_copy(unsigned char *d, const unsigned char *s, size_t n, unsigned char *ref, size_t span) {
@@ -199,6 +327,8 @@ static void suite(int full) {
             }
         }
     }
+
+    derived_quick(a, b, ref);
 
     if (!full) {
         goto guards;
@@ -671,6 +801,187 @@ static void entries(void) {
     printf("entry points: PASS %zu checks\n", checks);
 }
 
+/* derived.c once more, on the dispatched table: memmem and strstr on every
+   needle and haystack of small alphabets, plainly and behind a prefix that
+   spends the scan's budget (the rest found by two-way), on long and
+   periodic needles; every function on objects that end at a guard page;
+   the edges of each. */
+static void derived(void) {
+    phase = "memmem and strstr, small alphabets";
+    unsigned char *h = malloc(1 << 17), *nd = malloc(4096);
+    CHECK(h && nd);
+    const size_t prefix = 200;   /* the needle's first byte, then one not in it: a place every other byte, none a match */
+
+    for (int alpha = 0; alpha < 3; alpha++) {
+        /* {a, b}: needles up to 6 bytes, haystacks up to 10; {a, b, c}: 4 and 6; {0, 1}: NULs inside, memmem only */
+        const unsigned char base = alpha == 2 ? 0 : 'a';
+        const size_t k = alpha == 1 ? 3 : 2, maxn = alpha == 1 ? 4 : 6, maxh = alpha == 1 ? 6 : 10;
+
+        for (size_t nl = 1; nl <= maxn; nl++) {
+            size_t ncount = 1;
+
+            for (size_t i = 0; i < nl; i++) {
+                ncount *= k;
+            }
+
+            for (size_t ni = 0; ni < ncount; ni++) {
+                for (size_t i = 0, v = ni; i < nl; i++, v /= k) {
+                    nd[i] = (unsigned char)(base + v % k);
+                }
+
+                nd[nl] = 0;
+
+                for (size_t hl = 0; hl <= maxh; hl++) {
+                    size_t hcount = 1;
+
+                    for (size_t i = 0; i < hl; i++) {
+                        hcount *= k;
+                    }
+
+                    for (size_t hi = 0; hi < hcount; hi++) {
+                        for (size_t f = 0; f <= (nl > 1 ? prefix : 0); f += prefix) {
+                            for (size_t i = 0; i < f; i++) {
+                                h[i] = i % 2 ? 'x' : nd[0];
+                            }
+
+                            for (size_t i = 0, v = hi; i < hl; i++, v /= k) {
+                                h[f + i] = (unsigned char)(base + v % k);
+                            }
+
+                            h[f + hl] = 0;
+                            const unsigned char *want = naive_find(h, f + hl, nd, nl);
+                            CHECK(D(str_memmem)(h, f + hl, nd, nl) == want);
+
+                            if (alpha != 2) {
+                                CHECK(D(str_strstr)((char *)h, (char *)nd) == (char *)want);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    phase = "memmem and strstr, long and periodic";
+
+    for (int t = 0; t < 20000; t++) {
+        size_t q = 1 + rnd() % 8, nl = 1 + rnd() % (t % 10 == 0 ? 700 : 40);
+        size_t hl = t % 50 == 0 ? rnd() % 100000 : rnd() % (nl > 40 ? 5000 : 3000);
+        unsigned char seed[8];
+
+        for (size_t i = 0; i < q; i++) {
+            seed[i] = (unsigned char)('a' + rnd() % 3);
+        }
+
+        for (size_t i = 0; i < nl; i++) {
+            nd[i] = seed[i % q];
+        }
+
+        if (rnd() % 2) {
+            nd[rnd() % nl] = (unsigned char)('a' + rnd() % 4);
+        }
+
+        nd[nl] = 0;
+
+        for (size_t i = 0; i < hl; i++) {
+            h[i] = rnd() % 16 ? seed[i % q] : (unsigned char)('a' + rnd() % 4);
+        }
+
+        if (rnd() % 2 && hl >= nl) {
+            memcpy(h + rnd() % (hl - nl + 1), nd, nl);
+        }
+
+        h[hl] = 0;
+        const unsigned char *want = naive_find(h, hl, nd, nl);
+        CHECK(D(str_memmem)(h, hl, nd, nl) == want);
+        CHECK(D(str_strstr)((char *)h, (char *)nd) == (char *)want);
+    }
+
+    phase = "derived functions at a guard page";
+    unsigned char *g = guard_pages(2), *gd = guard_pages(2);
+
+    for (size_t n = 0; n <= 300; n++) {
+        unsigned char *s = g + 8192 - n - 1, *d = gd + 8192 - n - 1;   /* the NULs the last mapped bytes */
+        pattern(s, n, (unsigned)n);
+        s[n] = 0;
+        CHECK(D(str_strnlen)((char *)s, n + 1000) == n);
+        CHECK(D(str_strnlen)((char *)s, SIZE_MAX) == n);
+        CHECK(D(str_strlcpy)((char *)d, (char *)s, n + 1) == n && !memcmp(d, s, n + 1));
+        CHECK(D(str_strlcpy)((char *)d, (char *)s, SIZE_MAX) == n && !memcmp(d, s, n + 1));
+        d[0] = 0;
+        CHECK(D(str_strlcat)((char *)d, (char *)s, n + 1) == n && !memcmp(d, s, n + 1));
+        d[0] = 0;
+        CHECK(D(str_strncat)((char *)d, (char *)s, SIZE_MAX) == (char *)d && !memcmp(d, s, n + 1));
+        char *dup = D(str_strdup)((char *)s);
+        CHECK(dup && !strcmp(dup, (char *)s));
+        free(dup);
+        dup = D(str_strndup)((char *)s, n + 50);
+        CHECK(dup && strlen(dup) == n && !memcmp(dup, s, n));
+        free(dup);
+        dup = D(str_strndup)((char *)s, n / 2);
+        CHECK(dup && strlen(dup) == n / 2 && !memcmp(dup, s, n / 2));
+        free(dup);
+        CHECK(D(str_strpbrk)((char *)s, "\x01\x02") == strpbrk((char *)s, "\x01\x02"));
+
+        for (size_t nl = 1; nl <= n && nl <= 40; nl += 1 + nl / 4) {
+            CHECK(D(str_memmem)(s, n, s + n - nl, nl) == naive_find(s, n, s + n - nl, nl));
+            CHECK(D(str_strstr)((char *)s, (char *)s + n - nl) == (char *)naive_find(s, n, s + n - nl, nl));
+        }
+
+        /* a place every other byte up to the guard: two-way finds the haystack's NUL by memchr as it goes */
+        for (size_t i = 0; i < n; i++) {
+            s[i] = i % 2 ? 'x' : 'a';
+        }
+
+        CHECK(D(str_strstr)((char *)s, "ab") == 0 && D(str_strstr)((char *)s, "axaxay") == 0);
+        CHECK(D(str_memmem)(s, n, "ab", 2) == 0);
+    }
+
+    phase = "derived functions, edges";
+    char text[64] = "  a,b ,, c ", *p = 0, *save = 0;
+    CHECK(D(str_memmem)(h, 0, nd, 0) == h && D(str_memmem)(h, 3, nd, 4) == 0);
+    CHECK(D(str_strstr)(text, "") == text && D(str_strstr)(text + 11, "") == text + 11 && D(str_strstr)(text + 11, "a") == 0);
+    CHECK(D(str_strsep)(&p, ",") == 0 && p == 0);
+    CHECK(D(str_strtok_r)(0, ",", &save) == 0);
+    CHECK(!strcmp(D(str_strtok)(text, " ,"), "a") && !strcmp(D(str_strtok)(0, " ,"), "b") && !strcmp(D(str_strtok)(0, " ,"), "c"));
+    CHECK(D(str_strtok)(0, " ,") == 0 && D(str_strtok)(0, " ,") == 0);
+    strcpy(text, "ab");
+    CHECK(D(str_strlcpy)(text, "xyz", 0) == 3 && !strcmp(text, "ab"));
+    CHECK(D(str_strlcat)(text, "xyz", 1) == 4 && !strcmp(text, "ab"));
+    CHECK(D(str_strncat)(text, "xyz", 0) == text && !strcmp(text, "ab"));
+    CHECK(D(str_bcmp)(text, "zz", 0) == 0);
+    char *dup = D(str_strndup)("abc", 0);
+    CHECK(dup && dup[0] == 0);
+    free(dup);
+    /* malloc failing: the address space limited to what the process has plus
+       16 MiB, a copy of a 64 MiB string asked for */
+    {
+        struct rlimit old, lim;
+        size_t big = (size_t)64 << 20;
+        char *s = malloc(big + 1);
+        CHECK(s && !getrlimit(RLIMIT_AS, &old));
+        memset(s, 'a', big);
+        s[big] = 0;
+        long pages = 0;
+        FILE *f = fopen("/proc/self/statm", "r");
+        CHECK(f && fscanf(f, "%ld", &pages) == 1);
+        fclose(f);
+        lim.rlim_cur = (rlim_t)pages * 4096 + ((rlim_t)16 << 20);
+        lim.rlim_max = old.rlim_max;
+        CHECK(!setrlimit(RLIMIT_AS, &lim));
+        char *d1 = D(str_strdup)(s), *d2 = D(str_strndup)(s, big);
+        CHECK(!setrlimit(RLIMIT_AS, &old));
+        CHECK(!d1 && !d2);
+        free(s);
+    }
+
+    munmap(g - 4096, 4 * 4096);
+    munmap(gd - 4096, 4 * 4096);
+    free(h);
+    free(nd);
+    printf("derived: PASS %zu checks: memmem and strstr on small alphabets and periodic needles, guard pages, edges\n", checks);
+}
+
 static void hosts(void) {
     const struct {
         const char *name;
@@ -818,5 +1129,7 @@ int main(void) {
     hosts();
     checks = 0;
     entries();
+    checks = 0;
+    derived();
     return 0;
 }

@@ -4,11 +4,15 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Permissively licensed string and memory functions for x86-64: `memcpy`,
-`memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strcat`, `strcmp`,
-`strspn`, `strcspn`. Written in a small C dialect with builtin SIMD
-operations, compiled by the project's Python compiler, and dispatched once
-by `cpuid` through one table of primitives. Meant to be linked into a
-static libc in place of its string routines.
+`memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strcpy`, `strcat`,
+`strcmp`, `strspn`, `strcspn`. Written in a small C dialect with builtin
+SIMD operations, compiled by the project's Python compiler, and dispatched
+once by `cpuid` through one table of primitives. Made of these (`derived.c`,
+each an object of its own in the archive): `bcmp`, `bcopy`, `bzero`,
+`explicit_bzero`, `mempcpy`, `strnlen`, `strncat`, `strlcpy`, `strlcat`,
+`strpbrk`, `strsep`, `strtok`, `strtok_r`, `strdup`, `strndup`, `memmem`,
+`strstr`. Meant to be linked into a static libc in place of its string
+routines.
 
 ## Build
 

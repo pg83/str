@@ -8,6 +8,7 @@ and the table a host gets points at these copies: <configuration>.<function>
 in the unit's object, laid out as the configuration asks (the Skylake-SP one
 with the JCC padding). The plain functions stay as well, calling through the
 table."""
+import copy
 import json
 from pathlib import Path
 
@@ -18,8 +19,11 @@ from .module import Module
 from .objmodel import Object, Reloc, Section, Symbol
 from .pipeline import optimize
 
-UNITS = [('sse2', 'sse2'), ('sse42', 'sse42'), ('avx2', 'avx2'), ('evex', 'evex'), ('evex512', 'evex512'), ('dispatch', 'sse2')]
+UNITS = [('sse2', 'sse2'), ('sse42', 'sse42'), ('avx2', 'avx2'), ('evex', 'evex'), ('evex512', 'evex512'), ('dispatch', 'sse2'), ('derived', 'sse2')]
 JCC = '_jcc'
+# units whose every public function is an object of its own, with the static functions and data it
+# uses, as in a C library: a program's own strlcpy does not clash with the strdup it links from here
+SPLIT = {'derived'}
 
 
 class Config:
@@ -181,6 +185,16 @@ def compile_library(source, archive, out=None, defines=None, phases=None):
         m = modules[unit]
         functions = [(fn, phases.get(fn.name, 0), False) for fn in m.emitted()]
         functions += [(fn, phases.get(fn.name, 0), config.jcc) for config, fn in clones[unit]]
+        if unit in SPLIT:
+            for group in split_groups(m, functions):
+                obj = own_data(m, group)
+                m.string_offsets = {}
+                data, exported = build_object(m, isa, group, obj, unit)
+                name = '%s.%s.o' % (unit, group[0][0].name)
+                (out / name).write_bytes(data)
+                objects.append((name, data, exported))
+            report.append('%s: %d functions in %d objects' % (unit, len(functions), sum(1 for f, _, _ in functions if not f.attrs.get('static'))))
+            continue
         obj = m.data
         data, exported = build_object(m, isa, functions, obj, unit)
         path = out / (unit + '.c.o')
@@ -192,6 +206,43 @@ def compile_library(source, archive, out=None, defines=None, phases=None):
     write_archive(archive, objects)
     (out / 'report.txt').write_text('\n'.join(report) + '\n')
     return {'archive': archive, 'objects': [out / n for n, _, _ in objects]}
+
+
+def referenced(fn):
+    """The symbols a function's code refers to."""
+    return [v.op.attrs['name'] for (_, *k), v in fn.consts.items() if k and k[0] == 'sym' and v.uses]
+
+
+def split_groups(module, functions):
+    """A split unit's functions by object: each public one with the static ones it reaches (a copy
+    in every object that needs one: local symbols)."""
+    entries = {fn.name: (fn, phase, jcc) for fn, phase, jcc in functions}
+    groups = []
+    for fn, _, _ in functions:
+        if fn.attrs.get('static'):
+            continue
+        names, todo = [fn.name], [fn]
+        while todo:
+            for name in referenced(todo.pop()):
+                g = module.functions.get(name)
+                if g is not None and g.attrs.get('static') and name not in names:
+                    names.append(name)
+                    todo.append(g)
+        groups.append([entries[n] for n in names])
+    return groups
+
+
+def own_data(module, group):
+    """The data of a split unit's object: what its functions refer to. Static data only, a global
+    object would be defined in every one."""
+    obj = copy.deepcopy(module.data)
+    if any(s.type == 'STT_OBJECT' and s.bind != 'STB_LOCAL' for s in obj.symbols):
+        raise ValueError('%s: a unit split by function defines global data' % module.path.name)
+    used = {name for fn, _, _ in group for name in referenced(fn)}
+    drop = {s.section for s in obj.symbols if s.type == 'STT_OBJECT' and s.name not in used}
+    obj.sections = {name: s for name, s in obj.sections.items() if name not in drop}
+    obj.symbols = [s for s in obj.symbols if s.section not in drop]
+    return obj
 
 
 def build_object(module, isa, functions, obj, unit):

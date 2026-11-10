@@ -9,6 +9,7 @@ UNITS = {
     'evex': ['-march=x86-64-v4', '-mprefer-vector-width=256'],
     'evex512': ['-march=x86-64-v4', '-mprefer-vector-width=512'],
     'dispatch': ['-march=x86-64'],
+    'derived': ['-march=x86-64'],
 }
 
 

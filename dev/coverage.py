@@ -29,7 +29,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 from units import UNITS  # noqa: E402
 
-SOURCES = ['sse2.c', 'sse42.c', 'avx2.c', 'evex.c', 'evex512.c', 'dispatch.c', 'common.h', 'pcmpistri.h']
+SOURCES = ['sse2.c', 'sse42.c', 'avx2.c', 'evex.c', 'evex512.c', 'dispatch.c', 'derived.c', 'common.h', 'pcmpistri.h']
 CFLAGS = ['-O1', '-fno-builtin', '-fno-stack-protector', '-fno-pic', '-fno-pie', '-ffunction-sections', '--coverage',
           '-fprofile-update=atomic', '-Wall', '-Wextra']
 
@@ -63,7 +63,7 @@ def main():
             o = obj / (unit + '.o')
             run([*cc, *cppflags, '-I', str(ROOT), *CFLAGS, *march, '-c', str(ROOT / (unit + '.c')), '-o', str(o)])
             objects.append(o)
-            if unit == 'dispatch':
+            if unit in ('dispatch', 'derived'):   # no configuration names these: no twins
                 continue
             # the *_jcc twins the Skylake-SP configuration names come from the post pass,
             # which has no part here: the unit compiled once more with its global
