@@ -7,7 +7,8 @@ that calls, or needs more than the zone holds, lowers rsp by a multiple of
 16 (so that calls see an aligned stack). A function of an AVX unit that
 dirtied the upper half of a ymm0-15 register executes vzeroupper before it
 returns or calls."""
-from .mir import Reg, Mem, Imm, Ins, CALLEE_SAVED, VEC
+from . import mir
+from .mir import Reg, Mem, Imm, Ins, VEC
 
 RED_ZONE = 128
 
@@ -25,7 +26,7 @@ def layout_slots(mf):
 
 
 def frame(mf):
-    saved = [r for r in CALLEE_SAVED if r in mf.used]
+    saved = [r for r in mir.abi.callee_saved if r in mf.used]
     calls = any(i.kind == 'call' for b in mf.blocks for i in b.ins)
     total, align = layout_slots(mf)
     rsp_mod16 = (8 + 8 * len(saved)) % 16          # rsp after the pushes
@@ -70,6 +71,36 @@ def frame(mf):
         b.ins = out
     mf.frame_size = adjust
     mf.saved = saved
+
+
+def stack_changes(mf):
+    """How far rsp is below its value at the entry, from each instruction that changes it on,
+    as [(offset of its end, bytes)] (from mf.ends, after assemble): the prologue's pushes and
+    subtraction, an epilogue's addition and pops, and the body's frame again after a return
+    or a tail jump, since what follows one is reached from the body. The unwind tables of an
+    object for wasm2o, which runs the code on goroutine stacks, are made of it."""
+    body = 8 * len(mf.saved) + mf.frame_size
+    below, out = 0, []
+    for end, i in mf.ends:
+        now = below
+        if i is None:
+            pass
+        elif i.op == 'push':
+            now += 8
+        elif i.op == 'pop':
+            now -= 8
+        elif i.op in ('sub', 'add') and isinstance(i.ops[0], Reg) and i.ops[0].r == 'rsp':
+            if not isinstance(i.ops[1], Imm):
+                raise ValueError('%s: rsp changed by a register' % mf.name)
+            now += i.ops[1].value if i.op == 'sub' else -i.ops[1].value
+        elif i.kind in ('ret', 'tail'):
+            now = body
+        elif 'rsp' in i.defs():
+            raise ValueError('%s: %s writes rsp' % (mf.name, i))
+        if now != below:
+            out.append((end, now))
+            below = now
+    return out
 
 
 def dirties(i):

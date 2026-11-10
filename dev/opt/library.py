@@ -11,10 +11,19 @@ padding). The plain functions stay as well, calling through the table.
 The archive is one object with one .text: every function at its 64-byte
 line, its entry at its phase, calls and jumps between them resolved here.
 Its API is global (the public slots' entry points, the host's choice,
-the table and the configurations, derived.c); every other name local."""
+the table and the configurations, derived.c); every other name local.
+
+Built for wasm2o (abi='wasm2o', mir.WASM2O), the code keeps the registers of
+the code wasm2o compiles and the object is one its loader links (pizdos,
+bin/wasm2o): the read-only data in one .rodata, no constructor, an .eh_frame
+with the stack pointer at every instruction, nothing outside it; derived.c is
+left out (strdup calls malloc). The loader calls str_choose and binds the
+public slots of the table it returns."""
 import json
+import struct
 from pathlib import Path
 
+from . import mir
 from .codegen import compile_function
 from .elfout import write_archive, write_object
 from .ir import Function
@@ -136,7 +145,16 @@ def retarget_tables(dispatch, configs, initial, slot_names):
             r.symbol, r.symbol_is_section = '%s.%s' % (matching.name, initial[slot_names[r.offset // 8]]), False
 
 
-def compile_library(source, archive, out=None, defines=None, phases=None):
+def compile_library(source, archive, out=None, defines=None, phases=None, abi='sysv'):
+    mir.use_abi(abi)
+    try:
+        return build_library(source, archive, out, defines, phases, abi)
+    finally:
+        mir.use_abi('sysv')
+
+
+def build_library(source, archive, out, defines, phases, abi):
+    units = [(u, isa) for u, isa in UNITS if abi != 'wasm2o' or u != 'derived']
     source, archive = Path(source), Path(archive)
     out = Path(out) if out is not None else archive.parent / 'post'
     out.mkdir(parents=True, exist_ok=True)
@@ -145,7 +163,7 @@ def compile_library(source, archive, out=None, defines=None, phases=None):
         path = source / 'dev/phases.json'
         phases = json.loads(path.read_text()) if path.exists() else {}
     modules = {}
-    for unit, isa in UNITS:
+    for unit, isa in units:
         m = Module(source / (unit + '.c'), isa, defines)
         optimize(m)
         modules[unit] = m
@@ -158,7 +176,7 @@ def compile_library(source, archive, out=None, defines=None, phases=None):
     retarget_tables(modules['dispatch'], configs, initial, slot_names)
     report = []
     # the copies: every function each configuration reaches from its slots
-    clones = {unit: [] for unit, _ in UNITS}
+    clones = {unit: [] for unit, _ in units}
     for config in configs:
         rename = {'str_' + s: '%s.%s' % (config.name, f) for s, f in config.slots.items()}
         todo = [(owner[name], name) for name in dict.fromkeys(config.slots.values())]
@@ -182,13 +200,13 @@ def compile_library(source, archive, out=None, defines=None, phases=None):
             clones[unit].append((config, copy_function(fn, '%s.%s' % (config.name, name), {**rename, **local})))
         report.append('%s: %d functions, %s' % (config.name, len(done), 'the JCC padding' if config.jcc else 'no padding'))
     functions = []
-    for unit, isa in UNITS:
+    for unit, isa in units:
         m = modules[unit]
         mine = [(unit, isa, fn, phases.get(fn.name, 0), False) for fn in m.emitted()]
         mine += [(unit, isa, fn, phases.get(fn.name, 0), config.jcc) for config, fn in clones[unit]]
         functions += mine
         report.append('%s: %d functions' % (unit, len(mine)))
-    data, exported = build_object(modules, functions, api_names(modules, slot_names))
+    data, exported = build_object(modules, functions, api_names(modules, slot_names), abi)
     name = 'libstr.o'
     (out / name).write_bytes(data)
     write_archive(archive, [(name, data, exported)])
@@ -208,13 +226,15 @@ def api_names(modules, slot_names):
     kernels = {'str_' + x for x in slot_names if x not in PUBLIC}
     out = set()
     for unit in ('dispatch', 'derived'):
-        m = modules[unit]
+        m = modules.get(unit)
+        if m is None:
+            continue
         out |= {f.name for f in m.functions.values() if not f.attrs.get('static') and f.name not in kernels}
         out |= {x.name for x in m.data.symbols if x.type == 'STT_OBJECT' and x.bind == 'STB_GLOBAL'}
     return out
 
 
-def build_object(modules, functions, api):
+def build_object(modules, functions, api, abi='sysv'):
     """functions [(unit, isa, fn, phase, jcc)] in one .text, each at a 64-byte line with the pad
     its code starts with (the entry at its phase) and int3 between them: a function's symbol is
     its entry, the pad never runs. A call or jump of one to another is resolved here (the
@@ -237,6 +257,7 @@ def build_object(modules, functions, api):
     code_symbols = []
     pools, pool_offsets, pool_symbols = {}, {}, []
     strings = {}       # (unit, label) -> the local symbol of the string
+    regions = []       # (entry, size, stack changes from the entry): the unwind tables
     for unit, isa, fn, phase, jcc in functions:
         mf, code, relocs = compile_function(fn, isa, phase=phase, jcc_align=jcc)
         start = -len(text) % 64 + len(text)
@@ -247,6 +268,7 @@ def build_object(modules, functions, api):
         placed[(unit, fn.name)] = entry
         by_name.setdefault(fn.name, []).append((unit, entry))
         code_symbols.append((unit, fn, entry, len(code) - mf.entry_offset))
+        regions.append((entry, len(code) - mf.entry_offset, [(at - mf.entry_offset, below) for at, below in mf.stack]))
         for offset, rtype, symbol, addend in relocs:
             sites.append((start + offset, rtype, symbol, addend, unit, mf))
     relocs = []
@@ -303,7 +325,90 @@ def build_object(modules, functions, api):
     file_symbol = Symbol('libstr', 0, 0, 'STT_FILE', 'STB_LOCAL', 'ABS')
     obj.symbols = ([file_symbol, Symbol('.text', 0, 0, 'STT_SECTION', 'STB_LOCAL', '.text')] + data_locals + pool_symbols
                    + [x for x in func_symbols if x.bind == 'STB_LOCAL'] + data_globals + [x for x in func_symbols if x.bind != 'STB_LOCAL'])
+    if abi == 'wasm2o':
+        for_wasm2o(obj, regions)
     return write_object(obj)
+
+
+def for_wasm2o(obj, regions):
+    """The object as wasm2o's loader takes it: the data, read-only, in one .rodata (the table
+    str_dispatch would write is not written there: the loader calls str_choose), the
+    constructor and the stack note dropped, and an .eh_frame of the regions. Nothing may
+    be outside: the loader resolves no symbol of the library."""
+    merged, data, relocs, align = {}, bytearray(), [], 16
+    for name, section in obj.sections.items():
+        if name in ('.text', '.init_array', '.note.GNU-stack'):
+            continue
+        at = -len(data) % section.align + len(data)
+        data += bytes(at - len(data)) + (section.data if section.type != 'SHT_NOBITS' else bytes(section.nobits_size))
+        merged[name] = at
+        align = max(align, section.align)
+    for name, at in merged.items():
+        for r in obj.sections[name].relocs:
+            relocs.append(Reloc(r.offset + at, r.type, r.symbol, r.addend, r.symbol_is_section))
+    for section in [obj.sections['.text']] + [None]:
+        for r in (section.relocs if section is not None else relocs):
+            if r.symbol_is_section and r.symbol in merged:
+                r.symbol, r.addend = '.rodata', r.addend + merged[r.symbol]
+            elif r.symbol_is_section and r.symbol != '.text':
+                raise ValueError('a relocation against %s' % r.symbol)
+    for x in obj.symbols:
+        if x.section in merged:
+            x.section, x.value = '.rodata', x.value + merged[x.section]
+    defined = {x.name for x in obj.symbols if x.section not in ('UND',)}
+    outside = sorted({r.symbol for s in (obj.sections['.text'].relocs, relocs) for r in s if not r.symbol_is_section and r.symbol not in defined})
+    if outside:
+        raise ValueError('the library for wasm2o refers to %s' % ', '.join(outside))
+    text = obj.sections['.text']
+    frames, frame_relocs = eh_frame(regions)
+    obj.sections = {'.text': text, '.rodata': Section('.rodata', 'SHT_PROGBITS', 2, align, bytes(data), relocs=relocs),
+                    '.eh_frame': Section('.eh_frame', 'SHT_PROGBITS', 2, 8, frames, relocs=frame_relocs)}
+    obj.symbols = [x for x in obj.symbols if x.section not in ('.init_array', '.note.GNU-stack')
+                   and not (x.type == 'STT_SECTION' and x.section not in obj.sections)]
+
+
+def uleb(x):
+    out = bytearray()
+    while True:
+        b, x = x & 0x7f, x >> 7
+        out.append(b | (0x80 if x else 0))
+        if not x:
+            return bytes(out)
+
+
+def eh_frame(regions):
+    """An .eh_frame for regions [(start in .text, size, [(offset, bytes below the entry's rsp)])]
+    and its relocations: a CIE (the CFA rsp + 8 at an entry, the return address under it) and
+    an FDE per region, its CFA offset changing where the stack pointer does."""
+    def entry(body):
+        body += bytes(-(len(body) + 4) % 8)          # DW_CFA_nop to the address size
+        return struct.pack('<I', len(body)) + body
+
+    # version 1, augmentation zR, code alignment 1, data alignment -8, return address in r16
+    # (rip), FDE addresses pc-relative 4-byte; def_cfa rsp+8, rip at cfa-8
+    out = bytearray(entry(struct.pack('<I', 0) + b'\x01zR\x00' + uleb(1) + b'\x78' + uleb(16) + uleb(1) + b'\x1b' + b'\x0c\x07\x08\x90\x01'))
+    relocs = []
+    for start, size, changes in regions:
+        program, loc = bytearray(), 0
+        for at, below in changes:
+            if at >= size:
+                continue
+            d = at - loc
+            if d < 64:
+                program.append(0x40 | d)
+            elif d < 256:
+                program += bytes([0x02, d])
+            elif d < 65536:
+                program += b'\x03' + struct.pack('<H', d)
+            else:
+                program += b'\x04' + struct.pack('<I', d)
+            program += b'\x0e' + uleb(8 + below)
+            loc = at
+        here = len(out)
+        body = struct.pack('<I', here + 4) + struct.pack('<iI', 0, size) + uleb(0) + program
+        relocs.append(Reloc(here + 8, 'R_X86_64_PC32', '.text', start, True))
+        out += entry(body)
+    return bytes(out), relocs
 
 
 def string_offset(module, obj, label):

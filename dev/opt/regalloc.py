@@ -14,9 +14,8 @@ blocks); when that leaves something uncolorable the allocation is redone
 with the tests. What cannot be colored then is spilled to a stack slot: its
 uses and definitions get a short-lived register around them, and the
 allocation runs again."""
-from .mir import Reg, Mem, Ins, VReg, GPR, VEC, MASK, CALLER_SAVED, CALLEE_SAVED, FLAGS, FLAG_WRITERS, bank
-
-GPR_POOL = CALLER_SAVED + CALLEE_SAVED      # the cheap ones first: no save and restore
+from . import mir
+from .mir import Reg, Mem, Ins, VReg, GPR, VEC, MASK, FLAGS, FLAG_WRITERS, bank
 
 
 def liveness(mf):
@@ -55,9 +54,9 @@ class Allocator:
     def __init__(self, mf, cls, prefer, aggressive=True):
         self.mf, self.cls, self.aggressive = mf, cls, aggressive
         if cls == 'gpr':
-            self.pool = GPR_POOL
+            self.pool = mir.abi.caller_saved + mir.abi.callee_saved      # the cheap ones first: no save and restore
         elif cls == 'vec':
-            self.pool = VEC if mf.isa in ('evex', 'evex512') else VEC[:16]
+            self.pool = [v for v in (VEC if mf.isa in ('evex', 'evex512') else VEC[:16]) if v not in mir.abi.reserved]
         else:
             self.pool = MASK
         self.prefer = prefer      # vreg -> ordered register names to try first

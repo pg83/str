@@ -18,8 +18,17 @@ routines.
 
 ```sh
 ./build -j8 libstr             # .build/libstr.a; Python only
-./build -j8 checks             # compiler tests, C test driver, decoder round-trip
+./build -j8 libstr_wasm2o      # .build/wasm2o/libstr.o: the same code for pizdos's wasm2o
+./build -j8 checks             # compiler tests, C test driver, decoder round-trip, the wasm2o contract
 ```
+
+`libstr_wasm2o` (`strcc.py --abi wasm2o`) compiles the library in the
+convention of the code [pizdos](https://github.com/pizd0s/kernel)'s wasm2o
+compiles, for its loader to link: arguments in `rax`, `rcx`, `rdx`, `rsi`,
+`rdi`, `r8`, `rbx` and `r9`-`r12` kept, `rbp`, `r13`-`r15` and vector
+register 15 never touched, no stack alignment assumed, an `.eh_frame` for
+the goroutine stacks it runs on. The loader calls `str_choose` and calls the
+public slots of the table it returns directly.
 
 ## Results
 

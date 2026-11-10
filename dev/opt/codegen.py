@@ -1,6 +1,6 @@
 """One function from the IR to bytes: selection, registers, frame, order, encoding."""
 from .asm import assemble, order_blocks
-from .frame import frame, vzeroupper
+from .frame import frame, stack_changes, vzeroupper
 from .isel import select
 from .mir import GPR, Label, Reg, Imm, Mem, FLAGS, FLAG_WRITERS
 from .regalloc import allocate, dead_code, liveness
@@ -140,4 +140,5 @@ def compile_function(fn, isa, phase=0, jcc_align=False):
     order_blocks(mf)
     code, relocs, labels = assemble(mf, phase=phase, jcc_align=jcc_align)
     mf.entry_offset = labels[mf.entry]  # past the pad that puts the entry at its phase: where calls land
+    mf.stack = stack_changes(mf)
     return mf, code, relocs

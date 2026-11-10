@@ -170,7 +170,8 @@ def structured(ins, isa):
 
 def assemble(mf, phase=0, jcc_align=False, loop_align=16):
     """mf's blocks (already ordered) to bytes; returns (code, relocs, labels) with
-    relocs [(offset, type, symbol, addend)] and labels {block: offset}."""
+    relocs [(offset, type, symbol, addend)] and labels {block: offset}. mf.ends lists
+    every instruction with the offset where it ends, in the order of the code."""
     order = mf.blocks
     position = {b: n for n, b in enumerate(order)}
     # aligned: the block a loop's backward branch lands on (the header, or the
@@ -272,6 +273,7 @@ def assemble(mf, phase=0, jcc_align=False, loop_align=16):
             break
     code = bytearray()
     relocs = []
+    mf.ends = []
     for kind, x in items:
         pad = pads[id(x)]
         if pad:
@@ -291,4 +293,5 @@ def assemble(mf, phase=0, jcc_align=False, loop_align=16):
             pos, width = fields[field]
             relocs.append((it.offset + pos, rtype, symbol, addend - (len(b) - pos)))
         code += b
+        mf.ends.append((len(code), it.ins))
     return bytes(code), relocs, labels

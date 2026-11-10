@@ -13,3 +13,5 @@ __pycache__/
 /.lab/
 /proof_elf
 /proof_oracle
+/check_wasm2o
+/libstr_wasm2o

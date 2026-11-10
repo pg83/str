@@ -25,6 +25,35 @@ ZERO_FLAG = {'add', 'sub', 'and', 'or', 'xor', 'neg', 'inc', 'dec'}
 CLOBBERED_BY_CALL = frozenset(CALLER_SAVED + VEC + MASK + [FLAGS])
 
 
+class Abi:
+    """A calling convention: the registers of the general arguments in order (the result in
+    rax), those a call may change (with every vector and mask register and the flags), those a
+    function saves when it writes them, those it never touches (allocation leaves them out),
+    and the alignment of rsp at a call."""
+
+    def __init__(self, name, args, caller_saved, callee_saved, reserved, stack_align):
+        self.name, self.args, self.caller_saved, self.callee_saved = name, args, caller_saved, callee_saved
+        self.reserved, self.stack_align = frozenset(reserved), stack_align
+
+
+# A C library's: System V.
+SYSV = Abi('sysv', ARG_GPR, CALLER_SAVED, CALLEE_SAVED, (), 16)
+# wasm2o's (pizdos, bin/wasm2o): the code it compiles calls with the arguments in rax, rcx, rdx,
+# rsi, rdi and r8 and keeps rbx and r9-r12 across a call; rbp is the frame pointer, r13 the
+# instance, r14 Go's g, r15 the memory base and xmm15 Go's zero, and a goroutine's stack is
+# aligned to 8 bytes.
+WASM2O = Abi('wasm2o', ['rax', 'rcx', 'rdx', 'rsi', 'rdi', 'r8'], ['rax', 'rcx', 'rdx', 'rsi', 'rdi', 'r8'],
+             ['rbx', 'r9', 'r10', 'r11', 'r12'], ['rbp', 'r13', 'r14', 'r15', 'v15'], 8)
+ABIS = {a.name: a for a in (SYSV, WASM2O)}
+# the convention of what is being compiled: compile_library sets it for a whole library
+abi = SYSV
+
+
+def use_abi(name):
+    global abi
+    abi = ABIS[name]
+
+
 def bank(preg):
     if preg in GPR:
         return 'gpr'

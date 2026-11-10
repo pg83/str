@@ -51,6 +51,17 @@ libstr = command(
 )
 install(libstr)
 
+# The library for wasm2o (pizdos, bin/wasm2o): the same code in the convention of the code
+# wasm2o compiles and the object its loader links (dev/opt/mir.py WASM2O, dev/opt/library.py).
+libstr_wasm2o = command(
+    name="libstr_wasm2o",
+    inputs=libstr.inputs,
+    outputs=["$(B)/wasm2o/libstr.a", "$(B)/wasm2o/libstr.o", "$(B)/wasm2o/report.txt"],
+    cmd=["python3", "$(S)/dev/strcc.py", "$(S)", "--abi", "wasm2o", "-o", "$(B)/wasm2o/libstr.a", "--out", "$(B)/wasm2o"],
+    descr="CC",
+    color="cyan",
+)
+
 # tst/test.c against the C library of the host: every level the host supports, and the dispatched table.
 test = program(
     name="test",
@@ -79,6 +90,16 @@ checks = [
         outputs=["$(B)/checks/test.txt"],
         deps=[test],
         cmd=["sh", "-c", '"$0" > "$1"', "$(B)/test", "$(B)/checks/test.txt"],
+        descr="CK",
+        color="light-green",
+    ),
+    # The library for wasm2o against the contract its loader and callers rely on.
+    command(
+        name="check_wasm2o",
+        inputs=["$(S)/tst/wasm2o.py", "$(S)/dev/x86.py", "$(S)/dev/elf.py"],
+        outputs=["$(B)/checks/wasm2o.txt"],
+        deps=[libstr_wasm2o],
+        cmd=["sh", "-c", 'python3 "$0" --object "$1" > "$2" 2>&1', "$(S)/tst/wasm2o.py", "$(B)/wasm2o/libstr.o", "$(B)/checks/wasm2o.txt"],
         descr="CK",
         color="light-green",
     ),

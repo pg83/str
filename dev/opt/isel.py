@@ -14,9 +14,9 @@ Mask-register values (AVX-512 compares) live in k registers; a copy to a
 general register is made where one is needed (kmov) and dropped when it is
 not. The ISA of the unit decides the forms: legacy SSE, VEX or EVEX, tzcnt
 or bsf, shlx or shifts by cl."""
-from . import ir
+from . import ir, mir
 from .ir import I1, I8, I16, I32, I64, PTR, INVERT, SWAP
-from .mir import (MFunction, Ins, Reg, Imm, Mem, Label, Sym, VReg, ARG_GPR, FLAGS, CALLER_SAVED, VEC, MASK, FLAG_WRITERS, ZERO_FLAG)
+from .mir import (MFunction, Ins, Reg, Imm, Mem, Label, Sym, VReg, FLAGS, VEC, MASK, FLAG_WRITERS, ZERO_FLAG)
 
 CC_OF = {'eq': 'e', 'ne': 'ne', 'ult': 'b', 'ule': 'be', 'ugt': 'a', 'uge': 'ae', 'slt': 'l', 'sle': 'le', 'sgt': 'g', 'sge': 'ge'}
 ARITH = {'add': 'add', 'sub': 'sub', 'and': 'and', 'or': 'or', 'xor': 'xor'}
@@ -675,11 +675,11 @@ class ISel:
                 vi += 1
             else:
                 r = self.define(p)
-                self.param_reg[p] = ARG_GPR[gi]
+                self.param_reg[p] = mir.abi.args[gi]
                 if p.ty.bits <= 32:
-                    self.emit('mov', Reg(r.r, 32), Reg(ARG_GPR[gi], 32), acc='w r', kind='copy')
+                    self.emit('mov', Reg(r.r, 32), Reg(mir.abi.args[gi], 32), acc='w r', kind='copy')
                 else:
-                    self.emit('mov', Reg(r.r, 64), Reg(ARG_GPR[gi], 64), acc='w r', kind='copy')
+                    self.emit('mov', Reg(r.r, 64), Reg(mir.abi.args[gi], 64), acc='w r', kind='copy')
                 gi += 1
 
     def phi_copies(self, b):
@@ -928,10 +928,11 @@ class ISel:
 
     def sel_alloca(self, op):
         align = op.attrs.get('align', 1)
-        if align > 16:
-            # the frame is 16-aligned: a wider alignment is made in a register
-            # over a slot padded by the difference
-            slot = self.slots[op] = self.mf.slot(op.attrs['size'] + align - 16, 16)
+        frame = mir.abi.stack_align
+        if align > frame:
+            # the frame is aligned as the convention keeps rsp: a wider alignment
+            # is made in a register over a slot padded by the difference
+            slot = self.slots[op] = self.mf.slot(op.attrs['size'] + align - frame, frame)
             t = self.new('gpr')
             self.emit('lea', Reg(t, 64), Mem(8, slot=slot, disp=align - 1), acc='w r')
             self.emit('and', Reg(t, 64), Imm(-align, 32), acc='rw r')
@@ -1376,7 +1377,7 @@ class ISel:
                 moves.append(('v%d' % vi, a))
                 vi += 1
             else:
-                moves.append((ARG_GPR[gi], a))
+                moves.append((mir.abi.args[gi], a))
                 gi += 1
         if gi > 6 or vi > 8:
             raise Unsupported('%s: too many arguments in a call' % self.fn.name)
@@ -1415,7 +1416,7 @@ class ISel:
             self.tail_done = True
             self.block.tail = True
             return
-        ins.imp_def = set(CALLER_SAVED) | set(VEC) | set(MASK) | {FLAGS}
+        ins.imp_def = set(mir.abi.caller_saved) | set(VEC) | set(MASK) | {FLAGS}
         if op.result is not None:
             v = op.result
             if v.ty.is_vec:
