@@ -139,4 +139,5 @@ def compile_function(fn, isa, phase=0, jcc_align=False):
     vzeroupper(mf)
     order_blocks(mf)
     code, relocs, labels = assemble(mf, phase=phase, jcc_align=jcc_align)
+    mf.entry_offset = labels[mf.entry]  # past the pad that puts the entry at its phase: where calls land
     return mf, code, relocs

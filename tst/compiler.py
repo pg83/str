@@ -76,10 +76,14 @@ def main():
                     fail('%s: relocation at %#x outside the code' % (fn.name, offset))
         print('%s: %d functions' % (unit, len(m.emitted())))
     # the archive: its objects, their symbols resolved within it (but EXTERNAL)
-    defined, needed, where = {}, {}, {}
+    defined, needed, where, functions = {}, {}, {}, set()
     for name, body in members(args.archive):
         obj = read_elf_bytes(body, name)
         for s in obj.symbols:
+            if s.type == 'STT_FUNC' and s.shndx != 0:
+                if s.name in functions:
+                    fail('%s: two functions of that name' % s.name)
+                functions.add(s.name)  # local ones too: one object, every name but the API's local
             if s.shndx == 0 and s.name:
                 needed.setdefault(s.name, set()).add(name)
             elif s.name and s.bind in ('STB_GLOBAL', 'STB_WEAK') and s.type in ('STT_FUNC', 'STT_OBJECT', 'STT_NOTYPE'):
@@ -97,9 +101,9 @@ def main():
     for config in configs:
         for slot, fn in config.slots.items():
             copy = '%s.%s' % (config.name, fn)
-            if copy not in defined:
+            if copy not in functions:
                 fail('%s: slot %s wants %s' % (config.name, slot, copy))
-    print('%d objects, %d configurations, %d symbols defined' % (len(where), len(configs), len(defined)))
+    print('%d objects, %d configurations, %d functions, %d names exported' % (len(where), len(configs), len(functions), len(defined)))
     print('compiler: %s' % ('ok' if not failures else '%d failures' % failures))
     sys.exit(1 if failures else 0)
 

@@ -247,6 +247,13 @@ def main():
         run([*base, *ISA_FLAGS[isa], *glibc_inc, '-I', ROOT, '-Wall', '-Wextra', '-c', src, '-o', obj], work, 'kl-' + src.stem)
         kl.append((obj, isa))
 
+    # ours with every function global: the library exports its API only, kbench names the implementations
+    ours = work / 'ours.a'
+    local = sorted({f[2] for f in (line.split() for line in run(['llvm-nm', '--defined-only', args.libstr], work, 'ours-nm').splitlines())
+                    if len(f) == 3 and f[1] == 't'})
+    (work / 'ours.globalize').write_text(''.join(n + '\n' for n in local))
+    run(['llvm-objcopy', '--globalize-symbols=' + str(work / 'ours.globalize'), args.libstr, ours], work, 'ours-globalize')
+
     # the baseline: every symbol prefixed base_ but its calls out of the library (memcpy)
     base_lib, base_gen = [], ['const struct str_config *const kl_base_configs = 0;', 'const unsigned kl_base_nconfigs = 0;',
                               'struct str_table *const kl_base_table = 0;', 'const char kl_base_rev[] = "";']
@@ -281,7 +288,7 @@ def main():
     for sym in variants:
         c = classify(sym, 'glibc')
         defs.append((c[0], sym, c[1], c[2]))
-    for sym in sorted(set(nm(args.libstr, '--defined-only', '-g'))):
+    for sym in sorted(set(nm(ours, '--defined-only', '-g'))):
         s = slot_of(sym)
         if s:
             slots.append((s[0], sym, s[1], s[2]))
@@ -350,7 +357,7 @@ def main():
                                ['noop_cpy', 'noop_set', 'noop_cmp', 'noop_len', 'noop_scpy', 'noop_scmp', 'noop_spn', 'noop_chr'] + variants) + '\n')
     run(['clang', '--no-default-config', '-fuse-ld=lld', '-nostdlib', '-static', '-no-pie', '-Wl,-z,noexecstack', '-Wl,--symbol-ordering-file=' + str(order),
          '-Wl,--no-warn-symbol-ordering', glibc / 'crt1.o', glibc / 'crti.o',
-         gcc / 'crtbeginT.o', *objs, *[o for o, _ in kl], args.libstr, *base_lib, *inputs, '-Wl,--start-group', glibc / 'libc.a', gcc / 'libgcc.a',
+         gcc / 'crtbeginT.o', *objs, *[o for o, _ in kl], ours, *base_lib, *inputs, '-Wl,--start-group', glibc / 'libc.a', gcc / 'libgcc.a',
          gcc / 'libgcc_eh.a', '-Wl,--end-group', gcc / 'crtend.o', glibc / 'crtn.o', '-o', args.binary], work, 'link')
     print(args.binary)
 

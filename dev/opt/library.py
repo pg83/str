@@ -4,11 +4,14 @@ given its own copy of the code it reaches.
 The sources call each other through the table (str_memcpy and the like, in
 dispatch.c, jump through str_table); a configuration is a complete table, so
 its copy of a function calls the configuration's implementations directly,
-and the table a host gets points at these copies: <configuration>.<function>
-in the unit's object, laid out as the configuration asks (the Skylake-SP one
-with the JCC padding). The plain functions stay as well, calling through the
-table."""
-import copy
+and the table a host gets points at these copies: <configuration>.<function>,
+laid out as the configuration asks (the Skylake-SP one with the JCC
+padding). The plain functions stay as well, calling through the table.
+
+The archive is one object with one .text: every function at its 64-byte
+line, its entry at its phase, calls and jumps between them resolved here.
+Its API is global (the public slots' entry points, the host's choice,
+the table and the configurations, derived.c); every other name local."""
 import json
 from pathlib import Path
 
@@ -21,9 +24,7 @@ from .pipeline import optimize
 
 UNITS = [('sse2', 'sse2'), ('sse42', 'sse42'), ('avx2', 'avx2'), ('evex', 'evex'), ('evex512', 'evex512'), ('dispatch', 'sse2'), ('derived', 'sse2')]
 JCC = '_jcc'
-# units whose every public function is an object of its own, with the static functions and data it
-# uses, as in a C library: a program's own strlcpy does not clash with the strdup it links from here
-SPLIT = {'derived'}
+PUBLIC = ('memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr')  # the rest are kernels
 
 
 class Config:
@@ -180,32 +181,20 @@ def compile_library(source, archive, out=None, defines=None, phases=None):
                         todo.append((unit, target))
             clones[unit].append((config, copy_function(fn, '%s.%s' % (config.name, name), {**rename, **local})))
         report.append('%s: %d functions, %s' % (config.name, len(done), 'the JCC padding' if config.jcc else 'no padding'))
-    objects = []
+    functions = []
     for unit, isa in UNITS:
         m = modules[unit]
-        functions = [(fn, phases.get(fn.name, 0), False) for fn in m.emitted()]
-        functions += [(fn, phases.get(fn.name, 0), config.jcc) for config, fn in clones[unit]]
-        if unit in SPLIT:
-            for group in split_groups(m, functions):
-                obj = own_data(m, group)
-                m.string_offsets = {}
-                data, exported = build_object(m, isa, group, obj, unit)
-                name = '%s.%s.o' % (unit, group[0][0].name)
-                (out / name).write_bytes(data)
-                objects.append((name, data, exported))
-            report.append('%s: %d functions in %d objects' % (unit, len(functions), sum(1 for f, _, _ in functions if not f.attrs.get('static'))))
-            continue
-        obj = m.data
-        data, exported = build_object(m, isa, functions, obj, unit)
-        path = out / (unit + '.c.o')
-        path.write_bytes(data)
-        objects.append((path.name, data, exported))
-        report.append('%s: %d functions' % (unit, len(functions)))
-        if unit == 'dispatch':
-            pass
-    write_archive(archive, objects)
+        mine = [(unit, isa, fn, phases.get(fn.name, 0), False) for fn in m.emitted()]
+        mine += [(unit, isa, fn, phases.get(fn.name, 0), config.jcc) for config, fn in clones[unit]]
+        functions += mine
+        report.append('%s: %d functions' % (unit, len(mine)))
+    data, exported = build_object(modules, functions, api_names(modules, slot_names))
+    name = 'libstr.o'
+    (out / name).write_bytes(data)
+    write_archive(archive, [(name, data, exported)])
+    report.append('%s: %d functions in one .text, %d names exported' % (name, len(functions), len(exported)))
     (out / 'report.txt').write_text('\n'.join(report) + '\n')
-    return {'archive': archive, 'objects': [out / n for n, _, _ in objects]}
+    return {'archive': archive, 'objects': [out / name]}
 
 
 def referenced(fn):
@@ -213,90 +202,107 @@ def referenced(fn):
     return [v.op.attrs['name'] for (_, *k), v in fn.consts.items() if k and k[0] == 'sym' and v.uses]
 
 
-def split_groups(module, functions):
-    """A split unit's functions by object: each public one with the static ones it reaches (a copy
-    in every object that needs one: local symbols)."""
-    entries = {fn.name: (fn, phase, jcc) for fn, phase, jcc in functions}
-    groups = []
-    for fn, _, _ in functions:
-        if fn.attrs.get('static'):
-            continue
-        names, todo = [fn.name], [fn]
-        while todo:
-            for name in referenced(todo.pop()):
-                g = module.functions.get(name)
-                if g is not None and g.attrs.get('static') and name not in names:
-                    names.append(name)
-                    todo.append(g)
-        groups.append([entries[n] for n in names])
-    return groups
+def api_names(modules, slot_names):
+    """What the object exports: the public slots' entry points and dispatch.c's other functions (the
+    host's choice and its parts), the table and the configurations, derived.c's functions."""
+    kernels = {'str_' + x for x in slot_names if x not in PUBLIC}
+    out = set()
+    for unit in ('dispatch', 'derived'):
+        m = modules[unit]
+        out |= {f.name for f in m.functions.values() if not f.attrs.get('static') and f.name not in kernels}
+        out |= {x.name for x in m.data.symbols if x.type == 'STT_OBJECT' and x.bind == 'STB_GLOBAL'}
+    return out
 
 
-def own_data(module, group):
-    """The data of a split unit's object: what its functions refer to. Static data only, a global
-    object would be defined in every one."""
-    obj = copy.deepcopy(module.data)
-    if any(s.type == 'STT_OBJECT' and s.bind != 'STB_LOCAL' for s in obj.symbols):
-        raise ValueError('%s: a unit split by function defines global data' % module.path.name)
-    used = {name for fn, _, _ in group for name in referenced(fn)}
-    drop = {s.section for s in obj.symbols if s.type == 'STT_OBJECT' and s.name not in used}
-    obj.sections = {name: s for name, s in obj.sections.items() if name not in drop}
-    obj.symbols = [s for s in obj.symbols if s.section not in drop]
-    return obj
-
-
-def build_object(module, isa, functions, obj, unit):
-    pools = {}      # constant size -> Section
-    pool_offsets = {}
-    obj.sections = {'.text': Section('.text', 'SHT_PROGBITS', 6, 4, b''), **obj.sections}
-    file_symbol = Symbol(module.path.name, 0, 0, 'STT_FILE', 'STB_LOCAL', 'ABS')
-    code_symbols, section_symbols = [], []
-    sizes = {}
-    pool_symbols = []     # the constants and strings the code refers to: local symbols, as the
-    # linker wants for mergeable sections (a section-relative addend before the piece is an error)
-    emitted = {f.name for f, _, _ in functions}
-    statics = {f.name for f, _, _ in functions if f.attrs.get('static')}
-    for fn, phase, jcc in functions:
+def build_object(modules, functions, api):
+    """functions [(unit, isa, fn, phase, jcc)] in one .text, each at a 64-byte line with the pad
+    its code starts with (the entry at its phase) and int3 between them: a function's symbol is
+    its entry, the pad never runs. A call or jump of one to another is resolved here (the
+    unit's own function first: statics of two units may share a name, the later gets its
+    unit's in front, <unit>.c.<name>); the constants pooled by size, the strings, the data
+    (dispatch's and derived's, their sections as they are) and what is outside relocations. The
+    API global, every other name local."""
+    obj = Object()
+    for unit, m in modules.items():
+        for name, section in m.data.sections.items():
+            if name in obj.sections:
+                raise ValueError('%s: data section %s in two units' % (unit, name))
+            obj.sections[name] = section
+        obj.symbols += m.data.symbols
+    data_names = {x.name for x in obj.symbols if x.type == 'STT_OBJECT'}
+    text = bytearray()
+    placed = {}        # (unit, name) -> the entry's offset
+    by_name = {}       # name -> [(unit, offset)]
+    sites = []         # (offset in .text, type, symbol, addend, unit)
+    code_symbols = []
+    pools, pool_offsets, pool_symbols = {}, {}, []
+    strings = {}       # (unit, label) -> the local symbol of the string
+    for unit, isa, fn, phase, jcc in functions:
         mf, code, relocs = compile_function(fn, isa, phase=phase, jcc_align=jcc)
-        name = '.text.' + fn.name
-        section = Section(name, 'SHT_PROGBITS', 6, 64, code)
+        start = -len(text) % 64 + len(text)
+        text += b'\xcc' * (start - len(text)) + code
+        entry = start + mf.entry_offset
+        if (unit, fn.name) in placed:
+            raise ValueError('%s: %s twice' % (unit, fn.name))
+        placed[(unit, fn.name)] = entry
+        by_name.setdefault(fn.name, []).append((unit, entry))
+        code_symbols.append((unit, fn, entry, len(code) - mf.entry_offset))
         for offset, rtype, symbol, addend in relocs:
-            if symbol in mf.constants.values():
-                data = next(d for d, label in mf.constants.items() if label == symbol)
-                csec = '.rodata.cst%d' % len(data)
-                if csec not in pools:
-                    pools[csec] = Section(csec, 'SHT_PROGBITS', 0x12, len(data), b'', entsize=len(data))
-                key = (csec, data)
-                if key not in pool_offsets:
-                    label = '.LCPI%d' % len(pool_symbols)
-                    pool_offsets[key] = label
-                    pool_symbols.append(Symbol(label, len(pools[csec].data), 0, 'STT_NOTYPE', 'STB_LOCAL', csec))
-                    pools[csec].data += data
-                section.relocs.append(Reloc(offset, rtype, pool_offsets[key], addend))
-            elif symbol.startswith('.L.str.'):
-                if symbol not in pool_offsets:
-                    pool_symbols.append(Symbol(symbol, string_offset(module, obj, symbol), 0, 'STT_NOTYPE', 'STB_LOCAL', '.rodata.str1.1'))
-                    pool_offsets[symbol] = symbol
-                section.relocs.append(Reloc(offset, rtype, symbol, addend))
-            elif symbol in module.functions and module.functions[symbol].attrs.get('static') and symbol not in emitted:
-                raise ValueError('%s: call to %s, which is not emitted' % (fn.name, symbol))
-            elif '.' in symbol and symbol not in emitted and symbol.split('.', 1)[1] in module.functions \
-                    and module.functions[symbol.split('.', 1)[1]].attrs.get('static'):
-                raise ValueError('%s: call to %s, a copy this object does not hold' % (fn.name, symbol))
-            else:
-                section.relocs.append(Reloc(offset, rtype, symbol, addend))
-        obj.sections[name] = section
-        sizes[name] = len(code)
-        bind = 'STB_LOCAL' if fn.attrs.get('static') else 'STB_GLOBAL'
-        code_symbols.append(Symbol(fn.name, 0, len(code), 'STT_FUNC', bind, name))
-        section_symbols.append(Symbol(name, 0, 0, 'STT_SECTION', 'STB_LOCAL', name))
+            sites.append((start + offset, rtype, symbol, addend, unit, mf))
+    relocs = []
+    for at, rtype, symbol, addend, unit, mf in sites:
+        if symbol in mf.constants.values():
+            value = next(d for d, label in mf.constants.items() if label == symbol)
+            csec = '.rodata.cst%d' % len(value)
+            if csec not in pools:
+                pools[csec] = Section(csec, 'SHT_PROGBITS', 0x12, len(value), b'', entsize=len(value))
+            key = (csec, value)
+            if key not in pool_offsets:
+                label = '.LCPI%d' % len(pool_symbols)
+                pool_offsets[key] = label
+                pool_symbols.append(Symbol(label, len(pools[csec].data), 0, 'STT_NOTYPE', 'STB_LOCAL', csec))
+                pools[csec].data += value
+            relocs.append(Reloc(at, rtype, pool_offsets[key], addend))
+        elif symbol.startswith('.L.str.'):
+            if (unit, symbol) not in strings:
+                label = '.L.str.%s.%s' % (unit, symbol[len('.L.str.'):])
+                strings[(unit, symbol)] = label
+                pool_symbols.append(Symbol(label, string_offset(modules[unit], obj, symbol), 0, 'STT_NOTYPE', 'STB_LOCAL', '.rodata.str1.1'))
+            relocs.append(Reloc(at, rtype, strings[(unit, symbol)], addend))
+        elif symbol in by_name and rtype in ('R_X86_64_PLT32', 'R_X86_64_PC32'):
+            target = placed.get((unit, symbol))
+            if target is None:
+                if len(by_name[symbol]) != 1:
+                    raise ValueError('%s: %s is in %s' % (unit, symbol, ', '.join(u for u, _ in by_name[symbol])))
+                target = by_name[symbol][0][1]
+            d = target + addend - at
+            if not -(1 << 31) <= d < (1 << 31):
+                raise ValueError('a displacement past 32 bits at %#x' % at)
+            text[at:at + 4] = (d & 0xffffffff).to_bytes(4, 'little')
+        elif symbol in by_name or symbol in data_names or not any(symbol == f.name for m in modules.values() for f in m.functions.values()):
+            relocs.append(Reloc(at, rtype, symbol, addend))  # an address taken, the data, or outside (malloc)
+        else:
+            raise ValueError('%s: %s refers to %s, which is not emitted' % (unit, mf.name, symbol))
+    obj.sections = {'.text': Section('.text', 'SHT_PROGBITS', 6, 64, bytes(text), relocs=relocs), **obj.sections}
+    # the data's references to a static function by its old section (the constructor in .init_array)
+    for section in obj.sections.values():
+        for r in section.relocs:
+            if r.symbol_is_section and r.symbol.startswith('.text.'):
+                unit, name = next((u, n) for (u, n) in placed if n == r.symbol[len('.text.'):])
+                r.symbol, r.addend = '.text', r.addend + placed[(unit, name)]
     for csec, section in pools.items():
         obj.sections[csec] = section
     obj.sections['.note.GNU-stack'] = Section('.note.GNU-stack', 'SHT_PROGBITS', 0, 1, b'')
-    data_locals = [s for s in obj.symbols if s.bind == 'STB_LOCAL']
-    data_globals = [s for s in obj.symbols if s.bind != 'STB_LOCAL']
-    obj.symbols = ([file_symbol] + section_symbols + data_locals + pool_symbols + [s for s in code_symbols if s.bind == 'STB_LOCAL']
-                   + data_globals + [s for s in code_symbols if s.bind != 'STB_LOCAL'])
+    names, func_symbols = {}, []
+    for unit, fn, entry, size in code_symbols:  # a name a second unit has too: its unit in front
+        name = fn.name if fn.name not in names else '%s.c.%s' % (unit, fn.name)
+        names[name] = unit
+        func_symbols.append(Symbol(name, entry, size, 'STT_FUNC', 'STB_GLOBAL' if name in api else 'STB_LOCAL', '.text'))
+    data_locals = [x for x in obj.symbols if x.bind == 'STB_LOCAL']
+    data_globals = [x for x in obj.symbols if x.bind != 'STB_LOCAL']
+    file_symbol = Symbol('libstr', 0, 0, 'STT_FILE', 'STB_LOCAL', 'ABS')
+    obj.symbols = ([file_symbol, Symbol('.text', 0, 0, 'STT_SECTION', 'STB_LOCAL', '.text')] + data_locals + pool_symbols
+                   + [x for x in func_symbols if x.bind == 'STB_LOCAL'] + data_globals + [x for x in func_symbols if x.bind != 'STB_LOCAL'])
     return write_object(obj)
 
 

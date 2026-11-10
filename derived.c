@@ -6,10 +6,6 @@
  * but malloc (strdup, strndup). Compiled once, for baseline x86-64: the
  * work is the primitives'.
  *
- * In the archive each public function is an object of its own (dev/opt/
- * library.py), as in a C library: a program that defines its own strlcpy
- * still links strdup from here.
- *
  * memmem and strstr scan for the needle's first byte and compare at each
  * place it is found; when that does much more work than it advances (the
  * first byte everywhere, long partial matches) they go on by the two-way
