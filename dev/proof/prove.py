@@ -2328,6 +2328,7 @@ class Prover:
         self.best_stop = {}  # (an access, its ways) -> the way no_stop_below proved it by last
         self.covered = {}  # id -> a first arrival at a loop's head whose general state's subtree is explored
         self.few = {}  # (rip, a shift count's term) -> its few values on the path, or None
+        self.loops_ahead = {}  # rip -> whether a loop's head can be reached from it
         self.prefix = getattr(args, 'prefix', '') or ''  # the first two-way branches' ways this run takes (a split of one proof)
         self.backs = set()
         self.t0 = time.time()
@@ -2354,7 +2355,7 @@ class Prover:
 
     def shift_cases(self, st, most=4, span_most=32):
         """A variable shift whose count register takes at most `most` values on
-        the path (outside a loop's general state): the path once per value,
+        the path (or an interval of up to span_most where no loop lies ahead): the path once per value,
         that value its condition and the register's: a case split, every way
         the count can be. strlen_tail evex512's first block, its NUL mask
         shifted by a & 63 (0, 16, 32 or 48: a 16-aligned): each bit then the
@@ -2376,9 +2377,12 @@ class Prover:
             # the values one by one when there are few; else an interval the path bounds the count to
             # (memchr_large's last block, its mask shifted by 32 - (end - a): 1 to 31), every value in it
             # a way (one the path rules out is a way with no input: its checks hold)
-            # (a loop's general state only: before a loop a way per value is a loop's subtree per value,
-            # truffle_scan's first block shifted by s & 31 would be 32)
-            self.few[key] = self.few_values(st, t, most) or (self.count_range(st, t, span_most) if st.gen is not None else None)
+            # (only where no loop lies ahead: before one, a way per value is that loop's subtree per value:
+            # truffle_scan's first block, shifted by s & 31 past strspn_long's table loop, made 32 of them)
+            ahead = self.loops_ahead.get(st.rip)
+            if ahead is None:
+                ahead = self.loops_ahead[st.rip] = bool(X.backward_targets(self.mach.image, st.rip))
+            self.few[key] = self.few_values(st, t, most) or (None if ahead else self.count_range(st, t, span_most))
         vals = self.few[key]
         if not vals or len(vals) < 2:
             return None

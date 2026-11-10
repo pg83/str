@@ -210,7 +210,12 @@ the solver asked for each) splits the path by them, the shift then by a
 constant: strlen_tail evex512's first block, its NUL mask shifted by a & 63
 (0, 16, 32 or 48), each bit then a byte at a constant offset from a, not
 one of 64 a symbolic shift may bring (killed at an hour on 4 paths; 140
-paths in 961 s with four threads).
+paths in 961 s with four threads). Where no loop lies ahead (no backward
+branch's target reachable) the split takes an interval of up to 32 values
+the path bounds the count to: memchr_large's last block, its mask shifted by
+32 - (end - a). Before a loop each value would be a subtree of that loop:
+truffle_scan's first block past strspn_long's table loop, shifted by s & 31,
+made 32 of them (a chain run's long-set proofs past four hours).
 
 strspn and strcspn split the sets at a length, --setmax N (32): the short
 spec takes those of up to N bytes, the long one longer ones, both proved
