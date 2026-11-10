@@ -301,8 +301,8 @@ class ISel:
             for op in list(addr_only):
                 for u in op.result.uses:
                     ok = (u.kind == 'load' and u.args[0] is op.result or u.kind == 'store' and u.args[0] is op.result
-                          or u.kind == 'vop' and u.attrs.get('memory') and u.args[-1 if 'store' in u.attrs['name'] else 0] is op.result
-                          and self.vop_address_index(u) is not None and u.args[self.vop_address_index(u)] is op.result
+                          or u.kind == 'vop' and u.attrs.get('memory') and self.vop_address_index(u) is not None
+                          and u.args[self.vop_address_index(u)] is op.result
                           or u in addr_only and u.kind != 'p2i'
                           or u.kind == 'phi' and op.kind == 'ptradd')     # (a lea where the phi's edge is, not in the loop body)
                     if not ok:
