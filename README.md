@@ -37,9 +37,9 @@ host (lower is faster):
 
 | platform | configuration | str | glibc 2.44 | FreeBSD | LLVM libc | musl 1.2.5 |
 |---|---|---|---|---|---|---|
-| Zen 5 (Ryzen AI 9 HX 370) | evex512 | **0.65** | 1 (22.8 ns) | 1.33 | 1.44 | 2.33 |
-| Skylake-SP (Xeon Gold 6148) | evex | **0.82** | 1 (36.3 ns) | 1.17 | 1.29 | 1.72 |
-| Broadwell-EP (Xeon E5-2690 v4) | avx2 | **0.98** | 1 (36.9 ns) | 1.14 | 1.31 | 1.55 |
+| Zen 5 (Ryzen AI 9 HX 370) | evex512 | **0.65** | 1 (22.4 ns) | 1.34 | 1.46 | 2.27 |
+| Skylake-SP (Xeon Gold 6148) | evex | **0.81** | 1 (36.2 ns) | 1.17 | 1.30 | 1.73 |
+| Broadwell-EP (Xeon E5-2690 v4) | avx2 | **0.96** | 1 (37.1 ns) | 1.13 | 1.30 | 1.55 |
 
 The workload is one trace of calls in a program's proportions (the
 weights of `dev/lab/workload.py`: `memcpy` 25, `strlen` 20, `strcmp` 12,
