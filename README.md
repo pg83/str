@@ -37,21 +37,22 @@ host (lower is faster):
 
 | platform | configuration | str | glibc 2.44 | FreeBSD | LLVM libc | musl 1.2.5 |
 |---|---|---|---|---|---|---|
-| Zen 5 (Ryzen AI 9 HX 370) | evex512 | **0.59** | 1 (16.1 ns) | 1.47 | 1.55 | 2.75 |
-| Skylake-SP (Xeon Gold 6148) | evex | **0.64** | 1 (20.0 ns) | 1.34 | 1.53 | 2.32 |
-| Broadwell-EP (Xeon E5-2690 v4) | avx2 | **0.91** | 1 (19.4 ns) | 1.36 | 1.55 | 2.13 |
+| Zen 5 (Ryzen AI 9 HX 370) | evex512 | **0.65** | 1 (22.8 ns) | 1.33 | 1.44 | 2.33 |
+| Skylake-SP (Xeon Gold 6148) | evex | **0.82** | 1 (36.3 ns) | 1.17 | 1.29 | 1.72 |
+| Broadwell-EP (Xeon E5-2690 v4) | avx2 | **0.98** | 1 (36.9 ns) | 1.14 | 1.31 | 1.55 |
 
-The workload is one trace of calls in a program's proportions (`memcpy`
-25%, `strlen` 20%, `strcmp` 12%, `memset` and `memcmp` 10% each, the rest a
-few percent), its sizes, alignments and contents drawn from measured
+The workload is one trace of calls in a program's proportions (the
+weights of `dev/lab/workload.py`: `memcpy` 25, `strlen` 20, `strcmp` 12,
+`memset` and `memcmp` 10, the rest a few each, the derived functions a
+small flow), its sizes, alignments and contents drawn from measured
 distributions: strings a median of 8 bytes, memory blocks of 14 to 29, and
-0.3% of the copies and fills on a power-law tail from 4 KiB to 8 MiB, as
-the programs below make them (`dev/lab/workload.py`). Each library runs it
-with its own function for every call: str and glibc as each dispatches on
-the host, LLVM libc built for the host's level. A figure is the time per
-call net of the stand's own cost, the minimum over the passes of four runs
-with the core's clock held at nominal; glibc's own time in parentheses.
-`dev/lab/libs.py` prints the table, each function's trace under it.
+1% of the copies and fills on a power-law tail from 4 KiB to 8 MiB, as
+the programs below make them. Each library runs it with its own function
+for every call: str and glibc as each dispatches on the host, LLVM libc
+built for the host's level. A figure is the time per call net of the
+stand's own cost, the minimum over the passes of four runs with the core's
+clock held at nominal; glibc's own time in parentheses. `dev/lab/libs.py`
+prints the table, each function's trace under it.
 
 A synthetic trace is not a program: its sizes are drawn call by call, where a
 program's come in peaks the branch predictor learns. So every change is

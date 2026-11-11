@@ -28,10 +28,25 @@ typedef struct {
     int spec; /* the post pass's copy for one configuration (<unit>.<name>, its calls direct), not a table client */
 } KlSlot;
 
+/* derived.c's functions that allocate nothing, in the workload's mix: ours
+   (str_*, through str_table) and the other libraries' by their prefix, by
+   name, not validated (the mixed trace's checksum against glibc is the check). */
+enum { D_BCMP, D_BCOPY, D_BZERO, D_MEMPCPY, D_STRNLEN, D_STRNCAT, D_STRLCPY, D_STRLCAT, D_STRPBRK, D_STRSEP, D_STRTOK, D_STRTOK_R, D_MEMMEM, D_STRSTR, D_N };
+
+typedef struct {
+    const char *origin; /* ours, base, freebsd, musl, llvm (glibc's come by their C names) */
+    const char *name;   /* the symbol */
+    int fn;             /* D_* */
+    void *addr;
+    unsigned needs;
+} KlDerived;
+
 extern const KlDef kl_defs[];
 extern const unsigned kl_ndefs;
 extern const KlSlot kl_slots[];
 extern const unsigned kl_nslots;
+extern const KlDerived kl_derived[];
+extern const unsigned kl_nderived;
 extern const char *const kl_jcc_configs[]; /* the configurations laid out with the JCC padding, 0-terminated */
 
 /* Another revision of ours, its symbols prefixed base_ (lab.py --base): its

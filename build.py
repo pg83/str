@@ -141,7 +141,7 @@ kbench = command(
     name="kbench",
     inputs=["$(S)/dev/lab/lab.py", "$(S)/dev/lab/kbench.c", "$(S)/dev/lab/kl.h", "$(S)/common.h", *build.glob("$(S)/dev/lab/kernels/*.c"),
             *build.glob("$(S)/dev/lab/canary/*.c"),
-            *build.glob("$(S)/dev/lab/freebsd/*.h"), *build.glob("$(S)/dev/lab/freebsd/machine/*.h")],
+            *build.glob("$(S)/dev/lab/freebsd/*.h"), *build.glob("$(S)/dev/lab/freebsd/machine/*.h"), *build.glob("$(S)/dev/lab/freebsd/ssp/*.h")],
     outputs=["$(B)/lab/kbench"],
     deps=[libstr, lab_deps],
     cmd=["python3", "$(S)/dev/lab/lab.py", "--deps", "$(B)/lab/deps", "--libstr", "$(B)/libstr.a", "--post-report", "$(B)/post/report.txt", "--work",

@@ -17,24 +17,34 @@ the automemcpy paper's published histograms, which a log-normal matches within
     a uniform position; memset: 80% zero; memmove: 50% overlapping.
   strspn skips leading whitespace (" \t", 0-3 bytes, geometric); strcspn
     scans a token for one of 1-3 delimiters.
-  call mix: each call's function drawn by the weights memcpy 25%, strlen
-    20%, strcmp 12%, memset 10%, memcmp 10%, strcpy 8%, strcspn 5%, memmove
-    5%, strspn 3%, strcat 2% (common sense, stated here so it can be argued
-    with), so that every function's branches see the others' in the history,
-    as in a program. The stand's own dispatch mispredicts then: noop, the
-    library of empty functions, measures it and libs.py subtracts it.
+  call mix: each call's function drawn by the weights MIX (memcpy 25, strlen
+    20, strcmp 12, memset and memcmp 10, strcpy 8, strcspn, memmove and
+    memchr 5, strspn 3, strcat 2, and derived.c's functions that allocate
+    nothing a small flow, 6 together: common sense, stated here so it can be
+    argued with; a weight is a float, change it), so that every function's
+    branches see the others' in the history, as in a program. The stand's own
+    dispatch mispredicts then: noop, the library of empty functions, measures
+    it and libs.py subtracts it.
+  the derived functions' arguments: strnlen's limit under the length half
+    the time; strlcpy, strncat and strlcat truncating 3 times in 10; strpbrk
+    on strcspn's strings; strstr and memmem in a haystack of 8 + 3 string
+    lengths for a needle of 1-8 bytes present half the time; strsep, strtok
+    and strtok_r on a token, a comma, 0-7 bytes (strtok: 0-2 commas first),
+    in the destination pool, the comma they overwrite put back by the stand.
   per-function traces: drawn on their own, not cut out of the mix, and long
-    (PER_FUNCTION calls): a pass of a short trace replays it many times, and
-    the branch predictor learns the replayed sequence (a trace of 5 000 strcat
-    calls: glibc's size branches at 0.05 mispredictions a call).
+    (PER_FUNCTION calls, a quarter of it for the derived functions): a pass
+    of a short trace replays it many times, and the branch predictor learns
+    the replayed sequence (a trace of 5 000 strcat calls: glibc's size
+    branches at 0.05 mispredictions a call).
   working set - 2 MiB of sources and 2 MiB of destinations, L2-sized.
   the tail - above 4 KiB a program's copies and fills fall off as a power,
     not as a log-normal (whose 0.1% of them past 4 KiB this capped at 4 KiB
     until 2026-11-11, so that copy_huge and fill_huge were never weighed): of
-    pizdos's 20 programs (pizdos.py trace) the median one makes some 0.3%
-    of its memcpy, memmove and memset calls longer than 4 KiB, P(N > n) ~
-    n^-1 beyond, and the longest are its decoders' canvases of 15 MB. So
-    0.3% of those calls get a size of 4 KiB * 1/u, u uniform, up to 8 MiB,
+    pizdos's 20 programs (pizdos.py trace) 2.0% of the memcpy and memmove
+    calls and 2.8% of the memset calls are longer than 4 KiB (the median
+    program's 0.3%, its decoders' up to 19%), P(N > n) ~ n^-1 beyond, and
+    the longest are the decoders' canvases of 15 MB. So 1% of those calls
+    get a size of 4 KiB * 1/u, u uniform, up to 8 MiB,
     drawn with an RNG of their own (the rest of the trace is as it was), at
     random places in regions of BIG bytes past each pool.
 
@@ -52,8 +62,14 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-OPS = ['memcpy', 'memmove', 'memmove_overlap', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'memcpy_dst']
-MIX = {'memcpy': 25, 'strlen': 20, 'strcmp': 12, 'memset': 10, 'memcmp': 10, 'strcpy': 8, 'strcspn': 5, 'memmove': 5, 'memchr': 5, 'strspn': 3, 'strcat': 2}
+OPS = ['memcpy', 'memmove', 'memmove_overlap', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'memcpy_dst',
+       'bcmp', 'bcopy', 'bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat', 'strpbrk', 'strsep', 'strtok', 'strtok_r', 'memmem', 'strstr']
+PRIMITIVES = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr']
+# the weights of the mix, a float each
+MIX = {'memcpy': 25.0, 'strlen': 20.0, 'strcmp': 12.0, 'memset': 10.0, 'memcmp': 10.0, 'strcpy': 8.0, 'strcspn': 5.0, 'memmove': 5.0, 'memchr': 5.0,
+       'strspn': 3.0, 'strcat': 2.0,
+       'strnlen': 1.0, 'strstr': 1.0, 'memmem': 0.5, 'strpbrk': 0.5, 'strlcpy': 0.5, 'mempcpy': 0.5, 'strlcat': 0.3, 'strncat': 0.3, 'strsep': 0.3,
+       'strtok': 0.3, 'strtok_r': 0.3, 'bcmp': 0.3, 'bzero': 0.3, 'bcopy': 0.2}
 SRC_SIZE = 8 << 20   # the first WORK_SET bytes are the working set of the mix (L2-sized); the long-string traces live beyond
 WORK_SET = 2 << 20
 DST_SIZE = 2 << 20
@@ -64,7 +80,7 @@ PER_FUNCTION = 1 << 17
 # median, sigma of ln n, share of zero-length calls: the log-normal fits of the measured data
 LOGNORMAL = {'string': (8, 1.2, 0.04), 'memcpy': (16, 1.8, 0.025), 'memmove': (14, 1.3, 0.01), 'memcmp': (14, 0.95, 0.001), 'memset': (29, 1.6, 0.007)}
 # the share of calls past 4 KiB, their P(N > n) = (n / 4 KiB)^-TAIL_POWER, the longest
-TAIL = {'memcpy': 0.003, 'memmove': 0.003, 'memset': 0.003}
+TAIL = {'memcpy': 0.01, 'memmove': 0.01, 'memset': 0.01}
 TAIL_POWER = 1.0
 TAIL_MAX = 8 << 20
 BIG = 16 << 20   # the region of the tail's blocks past each pool
@@ -160,6 +176,29 @@ def generate(seed=1, records=RECORDS, per_function=PER_FUNCTION):
         slot = strcat_dst.place(text(rng, m) + b'\0' + bytes(n + 1), rng)
         dst.data[slot:slot + m + 1] = strcat_dst.data[slot:slot + m + 1]
         objects['strcat'].append((m, a, slot))   # n = the destination's own length: the runner re-terminates it before each call
+        objects['strncat'].append((m, n, a, slot))
+    # the tokens of strsep, strtok and strtok_r: in the destination pool too (they write a NUL
+    # over the delimiter; the stand puts it back before each call), strtok's with 0-2 commas first
+    for op in ('strsep', 'strtok'):
+        for _ in range(4096):
+            k = min(int(rng.expovariate(1.0)), 2) if op == 'strtok' else 0
+            tok = text(rng, draw('string'))
+            s = b',' * k + tok + b',' + text(rng, rng.randrange(8)) + b'\0'
+            slot = strcat_dst.place(s, rng)
+            dst.data[slot:slot + len(s)] = s
+            objects[op].append((k + len(tok), slot, sets['d1']))   # n = where the comma is
+    objects['strtok_r'] = objects['strtok']
+    # strstr and memmem: a haystack of 8 + 3 string lengths, a needle of 1-8 bytes in it half the time
+    for _ in range(4096):
+        hl = min(4096, 8 + 3 * draw('string'))
+        hay = text(rng, hl)
+        nl = 1 + min(int(rng.expovariate(0.5)), 7)
+        if rng.random() < 0.5:
+            at = rng.randrange(hl - nl + 1)
+            needle = hay[at:at + nl]
+        else:
+            needle = bytes(rng.choice(b'!#$%&*+-./:<>?@^~') for _ in range(nl))   # never in the haystack's letters
+        objects['strstr'].append((hl, src.place(hay + b'\0', rng), src.place(needle + b'\0', rng), nl))
     for _ in range(counts['strcspn']):
         n = draw('string')
         setname = rng.choice(['d1', 'd2', 'd3', 'd4'])
@@ -194,14 +233,44 @@ def generate(seed=1, records=RECORDS, per_function=PER_FUNCTION):
         if op == 'strcpy':
             n, a, _ = rng.choice(objects['strcpy'])
             return (op, n, a, rng.randrange(0, DST_SIZE // 2 - 4096))
-        n, a, b = rng.choice(objects[op])   # memcmp, strlen, strcmp, strspn, strcspn, memchr, strcat
+        if op in ('bcopy', 'mempcpy'):
+            r = body('memcpy')
+            return (op, *r[1:])
+        if op == 'bzero':
+            r = body('memset')
+            return (op, r[1], 0, r[3])
+        if op == 'bcmp':
+            return (op, *rng.choice(objects['memcmp']))
+        if op == 'strnlen':
+            n, a, _ = rng.choice(objects['strlen'])
+            return (op, rng.randrange(n) if n and rng.random() < 0.5 else n + 1 + rng.randrange(16), a, 0)
+        if op == 'strlcpy':
+            n, a, _ = rng.choice(objects['strcpy'])
+            limit = rng.randrange(n + 1) if rng.random() < 0.3 else n + 1 + rng.randrange(8)
+            return (op, limit, a, rng.randrange(0, DST_SIZE // 2 - 4096))
+        if op in ('strncat', 'strlcat'):
+            m, n, a, slot = rng.choice(objects['strncat'])
+            if op == 'strncat':
+                limit = rng.randrange(n + 1) if rng.random() < 0.3 else n + 1 + rng.randrange(8)
+            else:
+                limit = m + rng.randrange(n + 1) if rng.random() < 0.3 else m + n + 1 + rng.randrange(8)
+            return (op, limit << 16 | m, a, slot)   # the destination's own length in the low half, the limit in the high one
+        if op == 'strpbrk':
+            return (op, *rng.choice(objects['strcspn']))
+        if op == 'strstr':
+            hl, h, nd, _ = rng.choice(objects['strstr'])
+            return (op, hl, h, nd)
+        if op == 'memmem':
+            hl, h, nd, nl = rng.choice(objects['strstr'])
+            return (op, nl << 16 | hl, h, nd)   # the haystack's length in the low half, the needle's in the high one
+        n, a, b = rng.choice(objects[op])   # memcmp, strlen, strcmp, strspn, strcspn, memchr, strcat, strsep, strtok, strtok_r
         return (op, n, a, b)
 
     ops = list(MIX)
     weights = [MIX[o] for o in ops]
     traces = [('mixed', [record(op) for op in rng.choices(ops, weights, k=records)])]
     for op in ops:
-        traces.append((op, [record(op) for _ in range(per_function)]))
+        traces.append((op, [record(op) for _ in range(per_function if op in PRIMITIVES else per_function // 4)]))
     # the set scans on long strings with larger sets (a parser's whitespace and delimiter
     # sets, lines of 64-1024 bytes): not in the mix, a trace of their own
     src.pos = max(src.pos, WORK_SET)
@@ -242,5 +311,5 @@ if __name__ == '__main__':
     traces = write(out)
     print('%s: %d records in %d traces, %.1f MB' % (out, len(traces[0][1]), len(traces), out.stat().st_size / 1e6))
     for name, records in traces[1:]:
-        sizes = sorted(r[1] for r in records)
+        sizes = sorted(r[1] & 0xffff if name in ('strncat', 'strlcat', 'memmem') else r[1] for r in records)   # the packed ones: the low half
         print('  %-8s %6d calls, size median %d, p90 %d' % (name, len(records), sizes[len(sizes) // 2], sizes[int(len(sizes) * 0.9)]))

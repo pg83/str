@@ -25,7 +25,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 LIBS = ['ours', 'base', 'glibc', 'freebsd', 'llvm', 'musl', 'asmlib']
 TRACES = ['mixed', 'memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'strspn_long',
-          'strcspn_long']
+          'strcspn_long', 'bcmp', 'bcopy', 'bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat', 'strpbrk', 'strsep', 'strtok', 'strtok_r',
+          'memmem', 'strstr']
 
 
 def host_data(pattern, host):

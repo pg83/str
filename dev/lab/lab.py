@@ -38,12 +38,22 @@ ISA_FLAGS = {'sse2': ['-march=x86-64'], 'ssse3': ['-march=x86-64', '-mssse3'], '
              'evex512': ['-march=x86-64-v4', '-mprefer-vector-width=512']}
 ISA_NEEDS = {'sse2': [], 'ssse3': ['F_SSSE3'], 'sse42': ['F_SSE42'], 'avx2': ['F_AVX2'], 'evex': ['F_AVX512'], 'evex512': ['F_AVX512'], 'rep': []}
 LLVM_LEVELS = {'v2': ['F_SSE42'], 'v3': ['F_AVX2'], 'v4': ['F_AVX512']}
-FREEBSD_UNITS = ['memcpy.S', 'memmove.S', 'memset.S', 'memcmp.S', 'strlen.S', 'strcmp.S', 'stpcpy.S', 'strcat.S', 'strcpy.c', 'strspn.S',
-                 'strcspn.S', 'strchrnul.S', 'memchr.S']
+# derived.c's functions in the mix (kl.h's D_*, the same order): every library's own
+DERIVED = ['bcmp', 'bcopy', 'bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat', 'strpbrk', 'strsep', 'strtok', 'strtok_r', 'memmem', 'strstr']
+FREEBSD_UNITS = ['amd64/string/' + n for n in ('memcpy.S', 'memmove.S', 'memset.S', 'memcmp.S', 'strlen.S', 'strcmp.S', 'stpcpy.S', 'strcat.S',
+                                               'strcpy.c', 'strspn.S', 'strcspn.S', 'strchrnul.S', 'memchr.S', 'bcmp.S', 'bcopy.c', 'bzero.c',
+                                               'strlcat.c', 'strlcpy.S', 'strncat.c', 'strnlen.c', 'strpbrk.c', 'strsep.c', 'memccpy.S')]
+FREEBSD_UNITS += ['string/' + n for n in ('memmem.c', 'mempcpy.c', 'strstr.c', 'strtok.c', 'strchr.c')]
 FREEBSD_SYMBOLS = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcmp', 'stpcpy', '__stpcpy', 'strcat', 'strcpy', 'strspn', 'strcspn',
-                   '__strcspn', 'strchrnul', '__strchrnul', 'memchr', '__memchr']
+                   '__strcspn', 'strchrnul', '__strchrnul', 'memchr', '__memchr', 'bcmp', 'bcopy', 'bzero', 'strlcat', 'strlcpy', '__strlcpy',
+                   'strncat', 'strnlen', 'strpbrk', 'strsep', 'memccpy', '__memccpy', 'memmem', 'mempcpy', 'strstr', 'strtok', 'strtok_r',
+                   '__strtok_r', 'strchr']
 MUSL_UNITS = ['src/string/' + n for n in ('memcmp.c', 'strlen.c', 'strcpy.c', 'stpcpy.c', 'strcat.c', 'strcmp.c', 'strspn.c', 'strcspn.c',
-                                          'strchrnul.c', 'memchr.c', 'x86_64/memcpy.s', 'x86_64/memmove.s', 'x86_64/memset.s')]
+                                          'strchrnul.c', 'memchr.c', 'x86_64/memcpy.s', 'x86_64/memmove.s', 'x86_64/memset.s',
+                                          'bcmp.c', 'bcopy.c', 'bzero.c', 'mempcpy.c', 'strnlen.c', 'strncat.c', 'strlcpy.c', 'strlcat.c',
+                                          'strpbrk.c', 'strsep.c', 'strtok.c', 'strtok_r.c', 'memmem.c', 'strstr.c', 'strchr.c')]
+# LLVM libc's sources: the primitives and the derived functions, bcmp, bcopy and bzero under strings/
+LLVM_SOURCES = [('string', f) for f in PRIMS] + [('strings' if d in ('bcmp', 'bcopy', 'bzero') else 'string', d) for d in DERIVED]
 
 
 def run(cmd, work, name):
@@ -103,6 +113,21 @@ def classify(sym, source):
         m = re.match(r'^llvm_(v[234])_(%s)$' % P, sym)
         if m:
             return 'llvm', m.group(2), LLVM_LEVELS[m.group(1)]
+    return None
+
+
+def classify_derived(sym, source):
+    """(origin, D_ name, needs) when sym is a library's derived function (its plain name:
+    FreeBSD's __strlcpy alias, __strtok_r, included)."""
+    D = '|'.join(DERIVED)
+    patterns = {'freebsd': (r'^fbsd_(?:__)?(%s)$' % D, lambda m: []), 'musl': (r'^musl_(%s)$' % D, lambda m: []),
+                'llvm': (r'^llvm_(v[234])_(%s)$' % D, lambda m: LLVM_LEVELS[m.group(1)]), 'ours': (r'^str_(%s)$' % D, lambda m: []),
+                'base': (r'^base_str_(%s)$' % D, lambda m: [])}
+    if source not in patterns:
+        return None
+    m = re.match(patterns[source][0], sym)
+    if m:
+        return source, m.groups()[-1], patterns[source][1](m)
     return None
 
 
@@ -181,10 +206,14 @@ def main():
         tar.extractall(fsrc, filter='data')
     fobjs = []
     for unit in FREEBSD_UNITS:
-        obj = work / ('fbsd-' + unit + '.o')
-        variant = ['-DBENCH_VARIANT=x86_64_v2'] if unit in ('strspn.S', 'strcspn.S') else []
+        obj = work / ('fbsd-' + Path(unit).name + '.o')
+        variant = ['-DBENCH_VARIANT=x86_64_v2'] if Path(unit).name in ('strspn.S', 'strcspn.S') else []
+        # __weak_reference: FreeBSD's cdefs' weak alias (strtok.c, strchr.c); the plain names are enough here
         run([*base, '-march=x86-64', *glibc_inc, '-I', HERE / 'freebsd', *['-D%s=fbsd_%s' % (s, s) for s in FREEBSD_SYMBOLS], *variant,
-             '-c', fsrc / 'lib/libc/amd64/string' / unit, '-o', obj], work, 'fbsd-' + unit)
+             '-D__weak_reference(sym,alias)=', '-c', fsrc / 'lib/libc' / unit, '-o', obj], work, 'fbsd-' + Path(unit).name)
+        # the C wrappers (bcopy.c, strncat.c, ...) #undef their own name against _FORTIFY_SOURCE, which
+        # undoes the rename above: the object's symbols get it again
+        run(['llvm-objcopy', *['--redefine-sym=%s=fbsd_%s' % (s, s) for s in FREEBSD_SYMBOLS], obj], work, 'fbsd-rename-' + Path(unit).name)
         fobjs.append(obj)
     farchive = work / 'freebsd.a'
     run(['llvm-ar', 'rcs', farchive, *fobjs], work, 'fbsd-ar')
@@ -225,9 +254,9 @@ def main():
             lflags.append('-DLIBC_COPT_' + flag)
     for level in LLVM_LEVELS:
         lobjs = []
-        for f in PRIMS:
+        for d, f in LLVM_SOURCES:
             obj = work / ('llvm-%s-%s.o' % (level, f))
-            run([*lflags, '-march=x86-64-' + level, '-c', lsrc / 'libc/src/string' / (f + '.cpp'), '-o', obj], work, 'llvm-%s-%s' % (level, f))
+            run([*lflags, '-march=x86-64-' + level, '-c', lsrc / 'libc/src' / d / (f + '.cpp'), '-o', obj], work, 'llvm-%s-%s' % (level, f))
             lobjs.append(obj)
         inputs[isolate(lobjs, 'llvm_%s_' % level, work, 'llvm-' + level)] = 'llvm'
 
@@ -277,12 +306,24 @@ def main():
                     'struct str_table *const kl_base_table = &base_str_table;', 'const char kl_base_rev[] = "%s";' % (args.base_rev_file.read_text().strip() if args.base_rev_file else '')]
 
     # the registry
-    defs, slots = [], []
+    defs, slots, derived = [], [], []
     for path, source in inputs.items():
         for sym in nm(path, '--defined-only', '-g'):
             c = classify(sym, source)
             if c:
                 defs.append((c[0], sym, c[1], c[2]))
+            d = classify_derived(sym, source)
+            if d:
+                derived.append((d[0], sym, d[1], d[2]))
+    for sym in sorted(set(nm(ours, '--defined-only', '-g'))):
+        d = classify_derived(sym, 'ours')
+        if d:
+            derived.append((d[0], sym, d[1], d[2]))
+    for a in base_lib:
+        for sym in sorted(set(nm(a, '--defined-only', '-g'))):
+            d = classify_derived(sym, 'base')
+            if d:
+                derived.append((d[0], sym, d[1], d[2]))
     glibc_syms = nm(glibc / 'libc.a', '--defined-only', '-g')
     variants = sorted({s for s in glibc_syms if classify(s, 'glibc')})
     for sym in variants:
@@ -311,6 +352,11 @@ def main():
     gen += ['    {(int)(offsetof(struct str_table, %s) / sizeof(void *)), "%s", kl_s%d, %s, %d},' % (sl, s, i, '|'.join(n) or '0', spec)
             for i, (sl, s, n, spec) in enumerate(slots)]
     gen += ['};', 'const unsigned kl_nslots = %d;' % len(slots)]
+    for i, d in enumerate(derived):
+        gen.append('extern char kl_e%d[] __asm__("%s");' % (i, d[1]))
+    gen.append('const KlDerived kl_derived[] = {')
+    gen += ['    {"%s", "%s", D_%s, kl_e%d, %s},' % (o, s, f.upper(), i, '|'.join(n) or '0') for i, (o, s, f, n) in enumerate(derived)]
+    gen += ['};', 'const unsigned kl_nderived = %d;' % len(derived)]
     # the configurations whose copies the post pass lays out with the JCC padding: their
     # <config>.<name> copies are the code of <name>_jcc, not of <name>
     jcc = re.findall(r'^(\w+): \d+ functions, the JCC padding$', args.post_report.read_text(), re.M) if args.post_report else []
@@ -327,7 +373,8 @@ def main():
     counts = {}
     for d in defs:
         counts[d[0]] = counts.get(d[0], 0) + 1
-    print('registry: %d kernels (%s), %d slot implementations of ours' % (len(defs), ', '.join('%s %d' % kv for kv in sorted(counts.items())), len(slots)))
+    print('registry: %d kernels (%s), %d slot implementations of ours, %d derived functions' % (
+        len(defs), ', '.join('%s %d' % kv for kv in sorted(counts.items())), len(slots), len(derived)))
 
     # kbench. The stand (its loops over a trace) is part of every measurement and
     # must keep one shape wherever it lands: no branch cut by or ending at a

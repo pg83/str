@@ -24,10 +24,11 @@ import gzip
 import json
 from pathlib import Path
 
+import sys
+
 ROOT = Path(__file__).resolve().parent.parent.parent
-# the workload's call shares (workload.py MIX)
-MIX = {'memcpy': 25, 'strlen': 20, 'strcmp': 12, 'memset': 10, 'memcmp': 10, 'strcpy': 8, 'strcspn': 5, 'memmove': 5, 'memchr': 5, 'strspn': 3,
-       'strcat': 2}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workload import MIX, PRIMITIVES  # noqa: E402  the mix's weights; the primitives are what the slots serve
 
 
 def load(path):
@@ -56,7 +57,7 @@ def main():
         base = 'ours/%s.t' % cfg
         # slot -> impl -> {prim: ratio to the base table}
         by_slot = collections.defaultdict(lambda: collections.defaultdict(dict))
-        for prim in MIX:
+        for prim in PRIMITIVES:
             ks = traces.get(prim, {})
             if base not in ks:
                 continue

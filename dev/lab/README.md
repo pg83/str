@@ -87,7 +87,11 @@ caches all of it by content.
 - **Traces** (`workload.py`): every function's trace of the workload and the
   long strspn/strcspn ones, each kernel, 7 passes, checksums against glibc.
   `--mixed`: the whole workload, each call's function drawn by the mix's
-  weights, for whole tables: every configuration of ours, glibc as
+  weights (`workload.py MIX`, a float each: memcpy 25, strlen 20, strcmp
+  12, memset and memcmp 10, strcpy 8, strcspn, memmove and memchr 5, strspn
+  3, strcat 2, and derived.c's functions that allocate nothing a small flow,
+  6 together, strnlen and strstr 1 each; explicit_bzero is left out: LLVM
+  libc and FreeBSD have none), for whole tables: every configuration of ours, glibc as
   dispatched, and `--table NAME=CONFIG:SLOT=FN,...` (a configuration through
   the table, as `ours/CONFIG.t`, with slots replaced: a kernel slot as well
   as a public one, which takes any kernel of its primitive by symbol;
@@ -137,9 +141,12 @@ caches all of it by content.
 - **Whole libraries** (`--libs`, the workload stand of the old bench.c
   `--workload`): ours as dispatched, glibc as dispatched, FreeBSD, LLVM libc
   at the host's level, musl, asmlib, each with its own function for every
-  primitive, on the mixed trace and every function's trace; noop measures
-  the stand's own cost per call, which `libs.py` subtracts. A library runs a
-  trace only with a valid function for every primitive in it.
+  primitive and for every derived function (ours through the table, as
+  derived.c calls them; the others' by name, `lab.py DERIVED`, taken as they
+  are: the mixed trace's checksum against glibc is their check), on the
+  mixed trace and every function's trace; noop measures the stand's own
+  cost per call, which `libs.py` subtracts. A library runs a trace only with
+  a valid function for every call in it.
 - **The core's clock** of every trace pass from APERF/MPERF where
   `/dev/cpu/N/msr` can be read (root: the lab hosts; here run.py uses sudo):
   turbo and the AVX-512 licenses in numbers (the `ghz` column).

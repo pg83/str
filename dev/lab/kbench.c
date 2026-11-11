@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -50,6 +51,19 @@ typedef char *(*f_scpy)(char *, const char *);
 typedef int (*f_scmp)(const char *, const char *);
 typedef size_t (*f_spn)(const char *, const char *);
 typedef void *(*f_chr)(const void *, int, size_t);
+/* derived.c's functions (kl.h D_*), in the mix */
+typedef void (*f_bcopy)(const void *, void *, size_t);
+typedef void (*f_bzero)(void *, size_t);
+typedef size_t (*f_nlen)(const char *, size_t);
+typedef char *(*f_ncat)(char *, const char *, size_t);
+typedef size_t (*f_lcpy)(char *, const char *, size_t);
+typedef char *(*f_pbrk)(const char *, const char *);
+typedef char *(*f_sep)(char **, const char *);
+typedef char *(*f_tok)(char *, const char *);
+typedef char *(*f_tok_r)(char *, const char *, char **);
+typedef void *(*f_memmem)(const void *, size_t, const void *, size_t);
+static const char *DN[D_N] = {"bcmp", "bcopy", "bzero", "mempcpy", "strnlen", "strncat", "strlcpy", "strlcat", "strpbrk", "strsep", "strtok", "strtok_r",
+                              "memmem", "strstr"};
 
 /* ------------------------------------------------------------------ host */
 
@@ -1566,8 +1580,15 @@ static void matrix(const char *regimes) {
 
 typedef struct { uint8_t op, pad[3]; uint32_t n; uint64_t a, b; } Rec;
 /* W_MEMCPY_DST: a memcpy with both objects in dst (pizdos.py trace: a program's
-   memory is one), as W_MEMMOVE_OVL is a memmove's */
-enum { W_MEMCPY, W_MEMMOVE, W_MEMMOVE_OVL, W_MEMSET, W_MEMCMP, W_STRLEN, W_STRCPY, W_STRCAT, W_STRCMP, W_STRSPN, W_STRCSPN, W_MEMCHR, W_MEMCPY_DST };
+   memory is one), as W_MEMMOVE_OVL is a memmove's. From W_BCMP on derived.c's
+   functions (workload.py OPS, the same order), in the mixed trace and their own
+   traces, run by whole tables only (tables_trace): strncat, strlcat and memmem
+   pack two lengths into n (the limit or the needle's in the high half); strsep,
+   strtok and strtok_r write a NUL over the delimiter, which the stand puts back
+   before each call (dst[a + n] = the set's byte), as it re-terminates strcat's
+   destination. */
+enum { W_MEMCPY, W_MEMMOVE, W_MEMMOVE_OVL, W_MEMSET, W_MEMCMP, W_STRLEN, W_STRCPY, W_STRCAT, W_STRCMP, W_STRSPN, W_STRCSPN, W_MEMCHR, W_MEMCPY_DST,
+       W_BCMP, W_BCOPY, W_BZERO, W_MEMPCPY, W_STRNLEN, W_STRNCAT, W_STRLCPY, W_STRLCAT, W_STRPBRK, W_STRSEP, W_STRTOK, W_STRTOK_R, W_MEMMEM, W_STRSTR };
 
 static inline __attribute__((always_inline)) uint64_t trace_body(const Kernel *k, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
     uint64_t sum = 0;
@@ -1600,6 +1621,7 @@ static inline __attribute__((always_inline)) uint64_t trace_body(const Kernel *k
 typedef struct {
     char name[64];
     struct str_table t; /* public slots only for the other libraries; a null one: the library has no such function */
+    void *d[D_N];       /* derived.c's functions: ours through the table, a library's own; null: it has none */
     int ours;
     struct str_table *tgt; /* as Kernel's */
     const struct str_table *base; /* --hybrid: the base revision's configuration, installed beside (its functions call through it) */
@@ -1678,6 +1700,94 @@ static void *noop_chr(const void *s, int c, size_t n) {
     return 0;
 }
 
+static void noop_bcopy(const void *s, void *d, size_t n) {
+    (void)s;
+    (void)d;
+    (void)n;
+}
+
+static void noop_bzero(void *d, size_t n) {
+    (void)d;
+    (void)n;
+}
+
+static size_t noop_nlen(const char *s, size_t n) {
+    (void)s;
+    (void)n;
+    return 0;
+}
+
+static char *noop_ncat(char *d, const char *s, size_t n) {
+    (void)s;
+    (void)n;
+    return d;
+}
+
+static size_t noop_lcpy(char *d, const char *s, size_t n) {
+    (void)d;
+    (void)s;
+    (void)n;
+    return 0;
+}
+
+static char *noop_pbrk(const char *s, const char *set) {
+    (void)s;
+    (void)set;
+    return 0;
+}
+
+static char *noop_sep(char **sp, const char *set) {
+    (void)set;
+    return *sp;
+}
+
+static char *noop_tok(char *s, const char *set) {
+    (void)set;
+    return s;
+}
+
+static char *noop_tok_r(char *s, const char *set, char **last) {
+    (void)set;
+    (void)last;
+    return s;
+}
+
+static void *noop_memmem(const void *h, size_t hl, const void *n, size_t nl) {
+    (void)h;
+    (void)hl;
+    (void)n;
+    (void)nl;
+    return 0;
+}
+
+/* A library's derived function by its prefixed name (FreeBSD's __strlcpy, __strtok_r too). */
+static void *lib_derived(const char *prefix, int d) {
+    char want[2][96];
+    snprintf(want[0], sizeof want[0], "%s%s", prefix, DN[d]);
+    snprintf(want[1], sizeof want[1], "%s__%s", prefix, DN[d]);
+
+    for (unsigned i = 0; i < kl_nderived; i++) {
+        if (kl_derived[i].fn == d && (!strcmp(kl_derived[i].name, want[0]) || !strcmp(kl_derived[i].name, want[1]))) {
+            return kl_derived[i].addr;
+        }
+    }
+
+    return 0;
+}
+
+/* Ours (str_*, through str_table) or the base revision's (base_str_*, through its table). */
+static void derived_of(const char *origin, void *out[D_N]) {
+    for (int d = 0; d < D_N; d++) {
+        out[d] = 0;
+
+        for (unsigned i = 0; i < kl_nderived; i++) {
+            if (kl_derived[i].fn == d && !strcmp(kl_derived[i].origin, origin)) {
+                out[d] = kl_derived[i].addr;
+            }
+        }
+    }
+}
+
 static void *lib_fn(const char *prefix, int p) {
     char want[2][96];
     snprintf(want[0], sizeof want[0], "%s%s", prefix, PN[p]);
@@ -1703,12 +1813,20 @@ static void library(const char *name, const char *prefix, int noop) {
     if (noop) {
         void *const f[] = {(void *)noop_cpy, (void *)noop_cpy, (void *)noop_set, (void *)noop_cmp, (void *)noop_len, (void *)noop_scpy,
                            (void *)noop_scpy, (void *)noop_scmp, (void *)noop_spn, (void *)noop_spn, (void *)noop_chr};
+        void *const g[D_N] = {(void *)noop_cmp, (void *)noop_bcopy, (void *)noop_bzero, (void *)noop_cpy, (void *)noop_nlen, (void *)noop_ncat,
+                              (void *)noop_lcpy, (void *)noop_lcpy, (void *)noop_pbrk, (void *)noop_sep, (void *)noop_tok, (void *)noop_tok_r,
+                              (void *)noop_memmem, (void *)noop_pbrk};
         memcpy(&x->t, f, sizeof f);
+        memcpy(x->d, g, sizeof g);
         return;
     }
 
     for (int p = 0; p < P_N; p++) {
         ((void **)&x->t)[p] = lib_fn(prefix, p);
+    }
+
+    for (int d = 0; d < D_N; d++) {
+        x->d[d] = lib_derived(prefix, d);
     }
 }
 
@@ -1725,6 +1843,7 @@ static void build_tables(void) {
         snprintf(x->name, sizeof x->name, "ours/%s", str_configs[c].name);
         x->t = str_configs[c].table;
         x->ours = 1;
+        derived_of("ours", x->d);
     }
 
     for (unsigned c = 0; c < kl_base_nconfigs; c++) {
@@ -1739,6 +1858,7 @@ static void build_tables(void) {
         x->t = kl_base_configs[c].table;
         x->ours = 1;
         x->tgt = kl_base_table;
+        derived_of("base", x->d);
 
         /* --hybrid: the host's configuration of ours with one public function the
            base revision's, for each: which of them a difference of the two on
@@ -1752,6 +1872,7 @@ static void build_tables(void) {
             ((void **)&h->t)[p] = ((void *const *)&kl_base_configs[c].table)[p];
             h->ours = 1;
             h->base = &kl_base_configs[c].table;
+            derived_of("ours", h->d);
         }
     }
 
@@ -1760,7 +1881,12 @@ static void build_tables(void) {
     void *const pub[] = {resolved_glibc((void *)memcpy), resolved_glibc((void *)memmove), resolved_glibc((void *)memset), resolved_glibc((void *)memcmp),
                          resolved_glibc((void *)strlen), resolved_glibc((void *)strcpy), resolved_glibc((void *)strcat), resolved_glibc((void *)strcmp),
                          resolved_glibc((void *)strspn), resolved_glibc((void *)strcspn), resolved_glibc((void *)memchr)};
+    void *const der[D_N] = {resolved_glibc((void *)bcmp), resolved_glibc((void *)bcopy), resolved_glibc((void *)bzero), resolved_glibc((void *)mempcpy),
+                            resolved_glibc((void *)strnlen), resolved_glibc((void *)strncat), resolved_glibc((void *)strlcpy), resolved_glibc((void *)strlcat),
+                            resolved_glibc((void *)strpbrk), resolved_glibc((void *)strsep), resolved_glibc((void *)strtok), resolved_glibc((void *)strtok_r),
+                            resolved_glibc((void *)memmem), resolved_glibc((void *)strstr)};
     memcpy(&g->t, pub, sizeof pub);
+    memcpy(g->d, der, sizeof der);
 
     /* --hybrid: the host's configuration of ours with one public function
        glibc's, for each: which of ours lose to glibc's in the mix */
@@ -1772,6 +1898,7 @@ static void build_tables(void) {
         h->t = base_config->table;
         ((void **)&h->t)[p] = pub[p];
         h->ours = 1;
+        derived_of("ours", h->d);
     }
 
     if (want_libs) {
@@ -1791,6 +1918,7 @@ static void build_tables(void) {
         Table *x = &tables[ntables++];
         snprintf(x->name, sizeof x->name, "ours/%s", buf);
         x->ours = 1;
+        derived_of("ours", x->d);
         int found = 0;
 
         for (unsigned c = 0; c < str_nconfigs; c++) {
@@ -1846,7 +1974,7 @@ static void build_tables(void) {
     }
 }
 
-static inline __attribute__((always_inline)) uint64_t mixed_body(const struct str_table *t, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
+static inline __attribute__((always_inline)) uint64_t mixed_body(const struct str_table *t, void *const *d, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
     uint64_t sum = 0;
 
     for (uint64_t i = 0; i < count; i++) {
@@ -1866,6 +1994,20 @@ static inline __attribute__((always_inline)) uint64_t mixed_body(const struct st
         case W_STRSPN: sum += t->strspn((const char *)src + q->a, (const char *)src + q->b); break;
         case W_STRCSPN: sum += t->strcspn((const char *)src + q->a, (const char *)src + q->b); break;
         case W_MEMCHR: { const u8x *r = (t->memchr)(src + q->a, (int)q->b, q->n); /* glibc's string.h has a memchr macro */ sum += r ? (uint64_t)(r - (src + q->a)) : q->n; break; }
+        case W_BCMP: sum += (uint64_t)(((f_cmp)d[D_BCMP])(src + q->a, src + q->b, q->n) != 0); break;
+        case W_BCOPY: ((f_bcopy)d[D_BCOPY])(src + q->a, dst + q->b, q->n); sum += q->n; break;
+        case W_BZERO: ((f_bzero)d[D_BZERO])(dst + q->b, q->n); sum += q->n; break;
+        case W_MEMPCPY: sum += (uintptr_t)((f_cpy)d[D_MEMPCPY])(dst + q->b, src + q->a, q->n) - (uintptr_t)(dst + q->b); break;
+        case W_STRNLEN: sum += ((f_nlen)d[D_STRNLEN])((const char *)src + q->a, q->n); break;
+        case W_STRNCAT: dst[q->b + (q->n & 0xffff)] = 0; sum += (uintptr_t)((f_ncat)d[D_STRNCAT])((char *)dst + q->b, (const char *)src + q->a, q->n >> 16) - (uintptr_t)(dst + q->b); break;
+        case W_STRLCPY: sum += ((f_lcpy)d[D_STRLCPY])((char *)dst + q->b, (const char *)src + q->a, q->n); break;
+        case W_STRLCAT: dst[q->b + (q->n & 0xffff)] = 0; sum += ((f_lcpy)d[D_STRLCAT])((char *)dst + q->b, (const char *)src + q->a, q->n >> 16); break;
+        case W_STRPBRK: { const char *r = ((f_pbrk)d[D_STRPBRK])((const char *)src + q->a, (const char *)src + q->b); sum += r ? (uint64_t)(r - ((const char *)src + q->a)) : q->n; break; }
+        case W_STRSEP: { char *p = (char *)dst + q->a; dst[q->a + q->n] = src[q->b]; char *r = ((f_sep)d[D_STRSEP])(&p, (const char *)src + q->b); sum += p ? (uint64_t)(p - r) : 0; break; }
+        case W_STRTOK: { dst[q->a + q->n] = src[q->b]; char *r = ((f_tok)d[D_STRTOK])((char *)dst + q->a, (const char *)src + q->b); sum += r ? (uint64_t)(r - ((char *)dst + q->a)) : 0; break; }
+        case W_STRTOK_R: { char *last; dst[q->a + q->n] = src[q->b]; char *r = ((f_tok_r)d[D_STRTOK_R])((char *)dst + q->a, (const char *)src + q->b, &last); sum += r ? (uint64_t)(r - ((char *)dst + q->a)) : 0; break; }
+        case W_MEMMEM: { const u8x *r = ((f_memmem)d[D_MEMMEM])(src + q->a, q->n & 0xffff, src + q->b, q->n >> 16); sum += r ? (uint64_t)(r - (src + q->a)) : q->n & 0xffff; break; }
+        case W_STRSTR: { const char *r = ((f_pbrk)d[D_STRSTR])((const char *)src + q->a, (const char *)src + q->b); sum += r ? (uint64_t)(r - ((const char *)src + q->a)) : q->n; break; }
         }
     }
 
@@ -1884,10 +2026,10 @@ static inline __attribute__((always_inline)) uint64_t mixed_body(const struct st
         __asm__ volatile(".skip " #K " * 16, 0x90");                                                                                            \
         return trace_body(k, recs, count, src, dst);                                                                                            \
     }                                                                                                                                           \
-    __attribute__((noinline, aligned(64))) static uint64_t mixed_run_##K(const struct str_table *t, const Rec *recs, uint64_t count, u8x *src,      \
-                                                                       u8x *dst) {                                                               \
+    __attribute__((noinline, aligned(64))) static uint64_t mixed_run_##K(const struct str_table *t, void *const *d, const Rec *recs,              \
+                                                                       uint64_t count, u8x *src, u8x *dst) {                                     \
         __asm__ volatile(".skip " #K " * 16, 0x90");                                                                                            \
-        return mixed_body(t, recs, count, src, dst);                                                                                            \
+        return mixed_body(t, d, recs, count, src, dst);                                                                                         \
     }
 
 STAND(0)
@@ -1897,42 +2039,57 @@ STAND(3)
 
 static int stand;
 static uint64_t (*const trace_runs[])(const Kernel *, const Rec *, uint64_t, u8x *, u8x *) = {trace_run_0, trace_run_1, trace_run_2, trace_run_3};
-static uint64_t (*const mixed_runs[])(const struct str_table *, const Rec *, uint64_t, u8x *, u8x *) = {mixed_run_0, mixed_run_1, mixed_run_2, mixed_run_3};
+static uint64_t (*const mixed_runs[])(const struct str_table *, void *const *, const Rec *, uint64_t, u8x *, u8x *) = {mixed_run_0, mixed_run_1, mixed_run_2, mixed_run_3};
 
 static uint64_t trace_run(const Kernel *k, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
     return trace_runs[stand](k, recs, count, src, dst);
 }
 
-static uint64_t mixed_run(const struct str_table *t, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
-    return mixed_runs[stand](t, recs, count, src, dst);
+static uint64_t mixed_run(const Table *x, const Rec *recs, uint64_t count, u8x *src, u8x *dst) {
+    return mixed_runs[stand](&x->t, x->d, recs, count, src, dst);
 }
 
-/* The functions a record calls, as public slots of a table. */
+/* The functions a record calls: a public slot of a table, or P_N + a derived one. */
 static int rec_slot(int op) {
     static const int slot[] = {[W_MEMCPY] = P_MEMCPY, [W_MEMMOVE] = P_MEMMOVE, [W_MEMMOVE_OVL] = P_MEMMOVE, [W_MEMSET] = P_MEMSET, [W_MEMCMP] = P_MEMCMP,
                                [W_STRLEN] = P_STRLEN, [W_STRCPY] = P_STRCPY, [W_STRCAT] = P_STRCAT, [W_STRCMP] = P_STRCMP, [W_STRSPN] = P_STRSPN,
-                               [W_STRCSPN] = P_STRCSPN, [W_MEMCHR] = P_MEMCHR, [W_MEMCPY_DST] = P_MEMCPY};
+                               [W_STRCSPN] = P_STRCSPN, [W_MEMCHR] = P_MEMCHR, [W_MEMCPY_DST] = P_MEMCPY, [W_BCMP] = P_N + D_BCMP,
+                               [W_BCOPY] = P_N + D_BCOPY, [W_BZERO] = P_N + D_BZERO, [W_MEMPCPY] = P_N + D_MEMPCPY, [W_STRNLEN] = P_N + D_STRNLEN,
+                               [W_STRNCAT] = P_N + D_STRNCAT, [W_STRLCPY] = P_N + D_STRLCPY, [W_STRLCAT] = P_N + D_STRLCAT, [W_STRPBRK] = P_N + D_STRPBRK,
+                               [W_STRSEP] = P_N + D_STRSEP, [W_STRTOK] = P_N + D_STRTOK, [W_STRTOK_R] = P_N + D_STRTOK_R, [W_MEMMEM] = P_N + D_MEMMEM,
+                               [W_STRSTR] = P_N + D_STRSTR};
     return slot[op];
+}
+
+/* Has the table a function for every call of the trace? */
+static int table_runs(const Table *x, uint64_t used) {
+    for (int p = 0; p < P_N; p++) {
+        if ((used >> p & 1) && !((void *const *)&x->t)[p]) {
+            return 0;
+        }
+    }
+
+    for (int d = 0; d < D_N; d++) {
+        if ((used >> (P_N + d) & 1) && !x->d[d]) {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 static void tables_trace(const char *name, const Rec *recs, uint64_t count, u8x *src, u8x *dst, const u8x *image, size_t dsz, int passes) {
     time_t t0 = time(0);
-    unsigned used = 0;
+    uint64_t used = 0;
     int ref = -1, non = 0;
 
     for (uint64_t i = 0; i < count; i++) {
-        used |= 1u << rec_slot(recs[i].op);
+        used |= 1ull << rec_slot(recs[i].op);
     }
 
     for (int i = 0; i < ntables; i++) {
         Table *x = &tables[i];
-        x->on = 1;
-
-        for (int p = 0; p < P_N; p++) {
-            if ((used >> p & 1) && !((void **)&x->t)[p]) {
-                x->on = 0;
-            }
-        }
+        x->on = table_runs(x, used);
 
         if (!x->on) {
             continue;
@@ -1946,7 +2103,7 @@ static void tables_trace(const char *name, const Rec *recs, uint64_t count, u8x 
 
         memcpy(dst, image, dsz);
         uint64_t a = now();
-        x->sum = mixed_run(&x->t, recs, count, src, dst);
+        x->sum = mixed_run(x, recs, count, src, dst);
         double est = (double)(now() - a) / (double)count;
         x->iters = est * count > 1e7 ? 1 : (size_t)(1e7 / (est * count)) + 1;
 
@@ -1989,7 +2146,7 @@ static void tables_trace(const char *name, const Rec *recs, uint64_t count, u8x 
             uint64_t a = now(), ap = msr_fd >= 0 ? rdmsr(0xe8) : 0, mp = msr_fd >= 0 ? rdmsr(0xe7) : 0;
 
             for (size_t it = 0; it < x->iters; it++) {
-                vsink += mixed_run(&x->t, recs, count, src, dst);
+                vsink += mixed_run(x, recs, count, src, dst);
             }
 
             uint64_t b = now();
@@ -2021,7 +2178,7 @@ static void tables_trace(const char *name, const Rec *recs, uint64_t count, u8x 
             pmu_start();
 
             for (size_t it = 0; it < x->iters; it++) {
-                vsink += mixed_run(&x->t, recs, count, src, dst);
+                vsink += mixed_run(x, recs, count, src, dst);
             }
 
             pmu_stop(pm, sizeof pm, (double)(count * x->iters));
