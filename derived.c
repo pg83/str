@@ -37,9 +37,13 @@ void *str_mempcpy(void *d, const void *s, size_t n) {
     return (u8 *)str_memcpy(d, s, n) + n;
 }
 
+/* The selects (UNPREDICTABLE): whether the string ends within n, whether it
+   fits, whether a delimiter is there, a program decides call by call; a
+   branch on it mispredicted half the time on the workload (strnlen: 40
+   cycles a call against glibc's 14 on Zen 5). */
 size_t str_strnlen(const char *s, size_t n) {
     const char *z = str_memchr(s, 0, n);
-    return z ? (size_t)(z - s) : n;
+    return UNPREDICTABLE(z != 0) ? (size_t)(z - s) : n;
 }
 
 char *str_strncat(char *d, const char *s, size_t n) {
@@ -54,7 +58,7 @@ size_t str_strlcpy(char *d, const char *s, size_t n) {
     size_t l = str_strlen(s);
 
     if (n) {
-        size_t k = l < n - 1 ? l : n - 1;
+        size_t k = UNPREDICTABLE(l < n - 1) ? l : n - 1;
         str_memcpy(d, s, k);
         d[k] = 0;
     }
@@ -74,7 +78,7 @@ size_t str_strlcat(char *d, const char *s, size_t n) {
 
 char *str_strpbrk(const char *s, const char *set) {
     s += str_strcspn(s, set);
-    return *s ? (char *)s : 0;
+    return UNPREDICTABLE(*s != 0) ? (char *)s : 0;
 }
 
 char *str_strsep(char **sp, const char *sep) {
