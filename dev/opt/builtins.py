@@ -64,6 +64,7 @@ add('_mm_cvtsi128_si32', INT, [V128], 'extract_low32')
 add('_mm_cvtsi32_si128', V128, [INT], 'insert_low32')
 add('_mm_storel_epi64', VOID, [VP, V128], 'store_low', memory='write', width=8)
 add('_mm_storeu_si32', VOID, [VP, V128], 'store_low', memory='write', width=4)
+add('_mm256_stream_si256', VOID, [VP, V256], 'stream', 'avx2', memory='write', width=32, alignment=32)
 for stem in ('cmpistri', 'cmpistra', 'cmpistrc', 'cmpistrz', 'cmpistrm'):
     add('_mm_' + stem, V128 if stem == 'cmpistrm' else INT, [V128, V128, INT], stem, 'sse42', immediates=((2, 0, 255),))
 add('_mm256_broadcastsi128_si256', V256, [V128], 'broadcast128', 'avx2')

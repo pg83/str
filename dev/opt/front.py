@@ -612,7 +612,7 @@ class Parser:
         volatile = bool(self.take('volatile') or self.take('__volatile__'))
         self.expect('(')
         code = self.string().value.decode()
-        if code not in ('', 'cpuid', 'xgetbv', 'rep movsb', 'rep stosb'):
+        if code not in ('', 'cpuid', 'xgetbv', 'rep movsb', 'rep stosb', 'sfence'):
             t.error('unsupported asm operation ' + repr(code))
         groups = []
         while self.take(':'):

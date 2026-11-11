@@ -92,6 +92,7 @@ def build_index():
         if m:
             add(Candidate(m, 1, 0xba, '', '*', ['Ev', 'Ib'], '', group=reg))
     add(Candidate('xgetbv', 1, 0x01d0, '', '*', [], 'nosuffix'))
+    add(Candidate('sfence', 1, 0xaef8, '', '*', [], 'nosuffix'))
     add(Candidate('endbr64', 1, 0x1efa, 'f3', '*', [], 'nosuffix'))
     add(Candidate('endbr32', 1, 0x1efb, 'f3', '*', [], 'nosuffix'))
     for (map_, op, pfx, w), (m, specs, attrs, evex) in x86.VEX.items():

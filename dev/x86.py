@@ -348,6 +348,7 @@ for pfx, m in (('', 'vorps'), ('66', 'vorpd')):
     v(1, 0x56, pfx, '*', m, ['Vx', 'Hx', 'Wx'], 'acc=W,R,R')
 v(1, 0x6f, '66', '*', 'vmovdqa', ['Vx', 'Wx'], 'acc=W,R', evex='no')
 v(1, 0x7f, '66', '*', 'vmovdqa', ['Wx', 'Vx'], 'acc=W,R', evex='no')
+v(1, 0xe7, '66', '*', 'vmovntdq', ['Wx', 'Vx'], 'acc=W,R', evex='no')   # memory only: a non-temporal store
 v(1, 0x6f, 'f3', '*', 'vmovdqu', ['Vx', 'Wx'], 'acc=W,R', evex='no')
 v(1, 0x7f, 'f3', '*', 'vmovdqu', ['Wx', 'Vx'], 'acc=W,R', evex='no')
 for pfx, w, m in (('66', 0, 'vmovdqa32'), ('66', 1, 'vmovdqa64'), ('f3', 0, 'vmovdqu32'), ('f3', 1, 'vmovdqu64'), ('f2', 0, 'vmovdqu8'), ('f2', 1, 'vmovdqu16')):
@@ -770,6 +771,10 @@ def lookup(c):
                 c.opcode = 0x01d0   # two-byte opcode 0F 01 D0
                 return 'xgetbv', [], 'nosuffix regs=rcx:R,rax:W,rdx:W'
             raise DecodeError('unknown 0F 01 %02x' % b)
+        if op == 0xae and c.pos < len(c.code) and c.code[c.pos] == 0xf8:
+            c.byte()
+            c.opcode = 0xaef8   # 0F AE F8: sfence
+            return 'sfence', [], 'nosuffix'
         if op == 0x1e:
             # F3 0F 1E FA/FB: endbr64/endbr32 (-fcf-protection); anything else is a reserved nop
             if pfx == 'f3' and c.pos < len(c.code) and c.code[c.pos] in (0xfa, 0xfb):
@@ -979,7 +984,7 @@ def finish(c, mnemonic, specs, attrs, ops):
 
 # ---------------------------------------------------------------- text
 
-NOSUFFIX = {'cbtw', 'cwtl', 'cltq', 'cwtd', 'cltd', 'cqto', 'cpuid', 'xgetbv', 'ret', 'leave', 'int3', 'ud2', 'hlt', 'syscall',
+NOSUFFIX = {'cbtw', 'cwtl', 'cltq', 'cwtd', 'cltd', 'cqto', 'cpuid', 'xgetbv', 'sfence', 'ret', 'leave', 'int3', 'ud2', 'hlt', 'syscall',
             'endbr64', 'endbr32', 'movslq', 'prefetch', 'nop', 'pause', 'vzeroupper',
             'movsb', 'movsw', 'movsl', 'movsq', 'stosb', 'stosw', 'stosl', 'stosq'}
 

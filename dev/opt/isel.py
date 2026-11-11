@@ -449,7 +449,7 @@ class ISel:
         name = op.attrs['name']
         if name in ('masked_load',):
             return 1
-        if name in ('masked_store', 'store_low'):
+        if name in ('masked_store', 'store_low', 'stream'):
             return 0
         return None
 
@@ -1489,6 +1489,9 @@ class ISel:
             ins = self.emit('stosb', rep='rep')
             ins.imp_use, ins.imp_def = {'rdi', 'rcx', 'rax'}, {'rdi', 'rcx'}
             ins.kind = 'string'
+        elif code == 'sfence':
+            ins = self.emit('sfence')
+            ins.kind = 'string'
         else:
             raise Unsupported('asm ' + code)
         for r, c in zip(op.results, outputs):
@@ -1610,6 +1613,10 @@ class ISel:
             width = op.attrs['width']
             mem = self.mem_operand(addr, width)
             self.emit(('v' if self.vex else '') + ('movq' if width == 8 else 'movd'), mem, self.reg(v, 128), acc='w r')
+            return
+        if name == 'stream':
+            addr, v = args
+            self.emit('vmovntdq', self.mem_operand(addr, v.ty.size), self.reg(v), acc='w r')
             return
         if name in ('cmpistri', 'cmpistra', 'cmpistrc', 'cmpistrz'):
             ins = self.pcmpistr(op, 'pcmpistri', args)
