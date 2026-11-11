@@ -201,6 +201,7 @@ size_t strlen_tail_avx2(const u8 *a, const u8 *s);
 int strcmp_tail_avx2(const u8 *a, const u8 *b);
 void *strcpy_long_avx2(u8 *d, const u8 *s, const u8 *a);
 void *copy_huge_avx2(u8 *d, const u8 *s, size_t n);           /* the loop below 32 KiB, rep movsb beyond */
+void *fill_huge_avx2(u8 *d, int c, size_t n);                  /* rep stosb below 8 MiB, non-temporal stores beyond */
 /* evex.c: AVX-512 with 256-bit registers */
 char *strcpy_evex(char *, const char *);
 char *strcat_evex(char *, const char *);
@@ -379,27 +380,35 @@ static inline int overlap_backward(const u8 *d, const u8 *s, size_t n) {
 
 /* ------------------------------------------------------- short copy/fill */
 
-/* n <= 32. Every load happens before every store, so overlap is fine. */
+/* n <= 32. Every load happens before every store, so overlap is fine. The
+   size classes in rising order, each but 16..32 jumped to: one taken branch
+   at most, where the descending tree took four for one byte. Broadwell, the
+   calls of pizdos's programs (dev/lab/pizdos.py trace, ns a call): CPython's
+   dict copies of 1 to 3 bytes 2.69 to 1.37 (glibc 1.98), djvu's single bytes
+   3.44 to 2.50 (glibc 2.84); the classes from 8 bytes up pay three compares
+   more, CPython's fannkuch, its copies of 8 to 32 bytes, 2.55 to 3.28. */
 static inline void copy_small(u8 *d, const u8 *s, size_t n) {
-    if (n >= 16) {
-        __m128i x = load16(s), y = load16(s + n - 16);
-        store16(d, x);
-        store16(d + n - 16, y);
-    } else if (n >= 8) {
-        uint64_t x = load64(s), y = load64(s + n - 8);
-        store64(d, x);
-        store64(d + n - 8, y);
-    } else if (n >= 4) {
-        uint32_t x = load32(s), y = load32(s + n - 4);
-        store32(d, x);
-        store32(d + n - 4, y);
-    } else if (n >= 2) {
+    if (__builtin_expect(n < 2, 0)) {
+        if (n) {
+            d[0] = s[0];
+        }
+    } else if (__builtin_expect(n < 4, 0)) {
         uint16_t x = load16b(s);
         u8 y = s[n - 1];
         store16b(d, x);
         d[n - 1] = y;
-    } else if (n) {
-        d[0] = s[0];
+    } else if (__builtin_expect(n < 8, 0)) {
+        uint32_t x = load32(s), y = load32(s + n - 4);
+        store32(d, x);
+        store32(d + n - 4, y);
+    } else if (__builtin_expect(n < 16, 0)) {
+        uint64_t x = load64(s), y = load64(s + n - 8);
+        store64(d, x);
+        store64(d + n - 8, y);
+    } else {
+        __m128i x = load16(s), y = load16(s + n - 16);
+        store16(d, x);
+        store16(d + n - 16, y);
     }
 }
 
@@ -414,27 +423,29 @@ static inline void copy_33_64(u8 *d, const u8 *s, size_t n) {
 
 /* n <= 32. The 8- and 4-byte stores go straight from the vector, 2..3
    bytes as three byte stores of c (glibc's): no move to a general register
-   first. Neither Broadwell's fixed-size matrix nor the traces told it from
-   the move (memset of 1..3 bytes 1.4-1.6x glibc either way in the matrix:
-   the size branches taken there, where glibc's fall through, cost that;
-   with them laid out as glibc's the matrix was even at 0..7 bytes and the
-   16..32-byte path 1.27x slower, the traces the same). */
+   first. The classes in rising order as copy_small's: one taken branch at
+   most, none for 16..32 (glibc's descending order with every class jumped
+   to cost that one 1.27x in Broadwell's matrix and CPython's 16..32-byte
+   fills 1.27x in pizdos's calls; this one, CPython's exceptions, 92% of
+   them 16..32, 2.20 to 2.45 ns a call, glibc 2.51). */
 static inline void fill_small(u8 *d, __m128i v, int c, size_t n) {
-    if (n >= 16) {
-        store16(d, v);
-        store16(d + n - 16, v);
-    } else if (n >= 8) {
-        _mm_storel_epi64((__m128i *)d, v);
-        _mm_storel_epi64((__m128i *)(d + n - 8), v);
-    } else if (n >= 4) {
-        _mm_storeu_si32(d, v);
-        _mm_storeu_si32(d + n - 4, v);
-    } else if (n >= 2) {
+    if (__builtin_expect(n < 2, 0)) {
+        if (n) {
+            d[0] = (u8)c;
+        }
+    } else if (__builtin_expect(n < 4, 0)) {
         d[0] = (u8)c;
         d[1] = (u8)c;
         d[n - 1] = (u8)c;
-    } else if (n) {
-        d[0] = (u8)c;
+    } else if (__builtin_expect(n < 8, 0)) {
+        _mm_storeu_si32(d, v);
+        _mm_storeu_si32(d + n - 4, v);
+    } else if (__builtin_expect(n < 16, 0)) {
+        _mm_storel_epi64((__m128i *)d, v);
+        _mm_storel_epi64((__m128i *)(d + n - 8), v);
+    } else {
+        store16(d, v);
+        store16(d + n - 16, v);
     }
 }
 

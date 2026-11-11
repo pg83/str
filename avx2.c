@@ -658,6 +658,50 @@ void *copy_huge_avx2(u8 *d, const u8 *s, size_t n) {
     RETURN_OPAQUE(d);
 }
 
+/* n >= REP_THRESHOLD: rep stosb, and from NT_THRESHOLD on 128 bytes a step
+   by non-temporal stores between ordinary ones at the ends, then an sfence:
+   the lines are written without being read first and leave the caches.
+   Measured on Broadwell (E5-2690 v4, 35 MB of L3; dev/lab/bigfill.py): into
+   lines not in the caches rep stosb fills 6.7 GB/s at every size from 256
+   KiB, these stores 15; into lines it filled just before, rep stosb 23 GB/s
+   up to 4 MiB, 21 at 8 and 16, 14 at 32, 6.7 at 64, these 15. Which way a
+   fill goes its size does not say; over pizdos's programs' calls (dev/lab/
+   pizdos.py trace, rep stosb below each threshold) 8 MiB came out best of 1
+   to 32: the geometric mean 1.005 of rep stosb's time at 1 MiB, 0.997 at 2,
+   0.998 at 4, 0.996 at 8, 1.002 at 16; pdf's 1.5 MB fills, written again
+   right away, 1.24 at 1 MiB and 1.07 at 2 and 4, svg's 15 MB canvases 0.87
+   up to 8 MiB and 1.00 from 16. glibc's threshold there lies between 4 and
+   8 MiB. */
+#define NT_THRESHOLD (8 << 20)
+
+void *fill_huge_avx2(u8 *d, int c, size_t n) {
+    if (n < NT_THRESHOLD) {
+        rep_stosb(d, c, n);
+        RETURN_OPAQUE(d);
+    }
+
+    __m256i v = _mm256_set1_epi8((char)c);
+    u8 *end = d + n - 128;
+    u8 *p = (u8 *)align_down(d, 32) + 32;
+    store256(d, v);
+
+    NO_UNROLL
+    while (p < end) {
+        _mm256_stream_si256((__m256i *)p, v);
+        _mm256_stream_si256((__m256i *)(p + 32), v);
+        _mm256_stream_si256((__m256i *)(p + 64), v);
+        _mm256_stream_si256((__m256i *)(p + 96), v);
+        p += 128;
+    }
+
+    __asm__ volatile("sfence" : : : "memory");
+    store256(end, v);
+    store256(end + 32, v);
+    store256(end + 64, v);
+    store256(end + 96, v);
+    RETURN_OPAQUE(d);
+}
+
 /* ------------------------------------------------------------------ fill */
 
 static inline void *fill_loop(u8 *d, __m256i v, size_t n) {
@@ -701,7 +745,7 @@ static inline void *fill_loop(u8 *d, __m256i v, size_t n) {
 void *fill_large_avx2(u8 *d, int c, size_t n) {
     __m256i v = _mm256_set1_epi8((char)c);
 
-    if (n >= REP_THRESHOLD) {
+    if (__builtin_expect(n >= REP_THRESHOLD, 0)) {
         return str_fill_huge(d, c, n);
     }
 
@@ -726,6 +770,18 @@ void *memset_avx2(void *dst, int c, size_t n) {
             store256(d + 32, v);
             store256(d + n - 64, v);
         }
+    } else if (n <= 256) {
+        /* in line, not through fill_large: file(1)'s 144-byte fill at one
+           place, Broadwell 9.16 to 8.44 ns a call of its calls (glibc 8.25) */
+        __m256i v = _mm256_set1_epi8((char)c);
+        store256(d, v);
+        store256(d + 32, v);
+        store256(d + 64, v);
+        store256(d + 96, v);
+        store256(d + n - 32, v);
+        store256(d + n - 64, v);
+        store256(d + n - 96, v);
+        store256(d + n - 128, v);
     } else {
         return str_fill_large(d, c, n);
     }

@@ -53,7 +53,7 @@ const struct str_config str_configs[] = {
         .strspn = strspn_avx2, .strcspn = strcspn_avx2,
         .copy_large = copy_large_avx2, .fill_large = fill_large_avx2, .memcmp_large = memcmp_large_avx2,
         .strlen_tail = strlen_tail_avx2, .strcmp_tail = strcmp_tail_avx2, .strcpy_long = strcpy_long_avx2,
-        .copy_huge = copy_huge_avx2, .fill_huge = fill_huge_rep,
+        .copy_huge = copy_huge_avx2, .fill_huge = fill_huge_avx2,
         .memchr = memchr_avx2, .memchr_large = memchr_large_avx2,
     }},
     /* Skylake-SP and its Cascade/Cooper Lake siblings: AVX-512 mostly at 256

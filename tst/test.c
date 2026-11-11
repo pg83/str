@@ -403,6 +403,32 @@ static void suite(int full) {
         }
     }
 
+    phase = "huge fills";
+    /* past 8 MiB avx2's fill_huge stores around the caches: the ends by
+       ordinary stores, the 128-byte steps between them aligned */
+    size_t mib8 = (size_t)8 << 20;
+    unsigned char *h = malloc(mib8 + 8192);
+    CHECK(h);
+    const size_t huge[] = {mib8 - 1, mib8, mib8 + 1, mib8 + 127, mib8 + 4097};
+
+    for (size_t k = 0; k < sizeof huge / sizeof *huge; k++) {
+        for (size_t o = 0; o < 64; o += 31) {
+            unsigned char *d = h + 64 + o, bad = 0;
+            size_t n = huge[k];
+            d[-1] = 0x11;
+            d[n] = 0x22;
+            CHECK(T->memset(d, 0xc3, n) == d && d[-1] == 0x11 && d[n] == 0x22);
+
+            for (size_t i = 0; i < n; i++) {
+                bad |= d[i] ^ 0xc3;
+            }
+
+            CHECK(!bad);
+        }
+    }
+
+    free(h);
+
 guards:;
     phase = "guard pages";
     unsigned char *ga = guard_pages(3), *gb = guard_pages(3), *gs = guard_pages(1);
