@@ -41,6 +41,10 @@ import smt as S  # noqa: E402
 from smt import const, var  # noqa: E402
 import machine as X  # noqa: E402
 
+# the threads' stacks: musl's default, the labs' python's, is 128 KiB, and a deep term a checking
+# thread walked (strspn_long sse42's) overflowed it: a SIGSEGV without a traceback
+threading.stack_size(64 << 20)
+
 USER_LO, USER_HI = 0x10000, (1 << 47) - (1 << 32)  # canonical user addresses, with room for any object
 ALIGN = int(os.environ.get('PROVE_ALIGN', '64'))  # the proof splits on a pointer's low bits: at least this when the code aligns at all (align_of)
 K_LIMIT = 1 << 47  # a loop's distance from its first iteration: below this no address wraps, and the next one's below it is proved
