@@ -62,6 +62,7 @@ struct str_table {
     size_t (*strspn)(const char *, const char *);
     size_t (*strcspn)(const char *, const char *);
     void *(*memchr)(const void *, int, size_t);
+    size_t (*strnlen)(const char *, size_t);
     /* kernels; the contracts every implementation keeps: */
     void *(*copy_large)(u8 *d, const u8 *s, size_t n);         /* n > 64, any overlap */
     void *(*fill_large)(u8 *d, int c, size_t n);               /* n > 128 */
@@ -72,6 +73,7 @@ struct str_table {
     void *(*copy_huge)(u8 *d, const u8 *s, size_t n);          /* n >= REP_THRESHOLD, no backward overlap */
     void *(*fill_huge)(u8 *d, int c, size_t n);                /* n >= REP_THRESHOLD */
     void *(*memchr_large)(const u8 *s, u8 c, size_t n);        /* no match in [s, A), n > A - s, A = align_down(s, 16) + 32; aligned loads only (C11) */
+    size_t (*strnlen_large)(const u8 *s, const u8 *from, size_t n); /* strnlen(s, n) with no NUL in [s, A), A = align_down(from, 16) + 32 > s, n > A - s; aligned loads only */
 };
 
 extern struct str_table str_table;
@@ -129,6 +131,7 @@ void *str_strcpy_long(u8 *d, const u8 *s, const u8 *a);
 void *str_copy_huge(u8 *d, const u8 *s, size_t n);
 void *str_fill_huge(u8 *d, int c, size_t n);
 void *str_memchr_large(const u8 *s, u8 c, size_t n);
+size_t str_strnlen_large(const u8 *s, const u8 *from, size_t n);
 
 /* derived.c: the functions made of the entry points above */
 int str_bcmp(const void *, const void *, size_t);
@@ -162,6 +165,8 @@ size_t strspn_sse2(const char *, const char *);
 size_t strcspn_sse2(const char *, const char *);
 void *memchr_sse2(const void *, int, size_t);
 void *memchr_large_sse2(const u8 *s, u8 c, size_t n);
+size_t strnlen_sse2(const char *, size_t);
+size_t strnlen_large_sse2(const u8 *s, const u8 *from, size_t n);
 void *copy_large_sse2(u8 *d, const u8 *s, size_t n);
 void *fill_large_sse2(u8 *d, int c, size_t n);
 int memcmp_large_sse2(const u8 *a, const u8 *b, size_t n);
@@ -194,6 +199,8 @@ size_t strspn_avx2_zen(const char *, const char *);   /* the shuffle scan's tabl
 size_t strcspn_avx2_zen(const char *, const char *);
 void *memchr_avx2(const void *, int, size_t);
 void *memchr_large_avx2(const u8 *s, u8 c, size_t n);
+size_t strnlen_avx2(const char *, size_t);
+size_t strnlen_large_avx2(const u8 *s, const u8 *from, size_t n);
 void *copy_large_avx2(u8 *d, const u8 *s, size_t n);
 void *fill_large_avx2(u8 *d, int c, size_t n);
 int memcmp_large_avx2(const u8 *a, const u8 *b, size_t n);
@@ -208,6 +215,7 @@ char *strcat_evex(char *, const char *);
 int strcmp_evex(const char *, const char *);
 int strcmp_tail_evex(const u8 *a, const u8 *b);
 void *memchr_evex(const void *, int, size_t);
+size_t strnlen_evex(const char *, size_t);
 /* evex512.c: AVX-512 with 512-bit registers */
 void *memcpy_evex512(void *, const void *, size_t);
 void *memmove_evex512(void *, const void *, size_t);
@@ -215,6 +223,7 @@ void *memset_evex512(void *, int, size_t);
 int memcmp_evex512(const void *, const void *, size_t);
 size_t strlen_evex512(const char *);
 void *memchr_evex512(const void *, int, size_t);
+size_t strnlen_evex512(const char *, size_t);
 void *fill_large_evex512(u8 *d, int c, size_t n);
 size_t strlen_tail_evex512(const u8 *a, const u8 *s);
 int strcmp_tail_evex512(const u8 *a, const u8 *b);
@@ -233,6 +242,8 @@ int strcmp_evex_jcc(const char *, const char *);
 int strcmp_tail_evex_jcc(const u8 *a, const u8 *b);
 void *memchr_evex_jcc(const void *, int, size_t);
 void *memchr_large_avx2_jcc(const u8 *s, u8 c, size_t n);
+size_t strnlen_evex_jcc(const char *, size_t);
+size_t strnlen_large_avx2_jcc(const u8 *s, const u8 *from, size_t n);
 size_t strspn_avx2_jcc(const char *, const char *);
 size_t strcspn_avx2_jcc(const char *, const char *);
 size_t strspn_sse42_jcc(const char *, const char *);

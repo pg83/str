@@ -306,6 +306,7 @@ strspn refuted "no match in the iteration" on that).
 |------|----------------|
 | `strlen` | the answer is the offset of the first NUL; every load in the pages of `[s, s + len]` (C11: the string may end at its NUL next to an unmapped page) |
 | `memchr` | the first `(u8)c` in `[s, s + n)` or null; loads within the pages up to the match (C11 lets the object end at it) or of the n bytes; nothing read for n = 0 |
+| `strnlen` | the offset of the first NUL in `[s, s + n)`, else n; loads as memchr's; nothing read for n = 0; its kernel `strnlen_large(s, from, n)` under its precondition (no NUL in `[s, A)`, `A = align_down(from, 16) + 32` within 256 bytes of s, n past `A - s`), taken by a tail call |
 | `memset` | every byte of `[d, d + n)` written with `(u8)c`, nothing else written, the answer `d` |
 | `memcpy` | every byte of `d` the corresponding byte of `s`, nothing else written, loads in the pages of `[s, s + n)`; the objects apart |
 | `memmove` | the same with the objects overlapping in any way: one memory, every byte written the source's as it was before the call |
@@ -321,7 +322,7 @@ strspn refuted "no match in the iteration" on that).
 | `truffle_scan` | for any two 16-byte tables and members 0 or 1, from any pointer, any stop past it: the answer `from - s` plus the offset of the first byte the tables say yes of (members) or no of; loads from from's page up to that byte's; nothing written |
 | `truffle_scan32` | count at most 32: the tables say of every byte whether it is one of the first count lanes of the two registers (or the NUL, for members), truffle_scan is handed them and from, s, members; its answer returned; nothing read but the frame |
 | `bcmp`, `bcopy`, `bzero`, `explicit_bzero` | a jump to memcmp, memmove, memset with the arguments of the definition |
-| `mempcpy`, `strnlen`, `strncat`, `strlcpy`, `strlcat`, `strdup`, `strndup` | the answer and every object's bytes the definition's, from the answers of the slots called (strlen's, memchr's) and malloc's (null or the size asked); nothing else written; the function's own loads and stores inside its objects |
+| `mempcpy`, `strncat`, `strlcpy`, `strlcat`, `strdup`, `strndup` | the answer and every object's bytes the definition's, from the answers of the slots called (strlen's, strnlen's) and malloc's (null or the size asked); nothing else written; the function's own loads and stores inside its objects |
 | `strpbrk`, `strsep`, `strtok_r`, `strtok` | the same past strspn's and strcspn's answers: the token, its end's NUL, the saved pointer; strtok_r and strtok in two classes (s a string; s null and the saved string, or none) |
 
 Every function and configuration is also checked for: aligned accesses

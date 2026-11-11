@@ -9,7 +9,9 @@
  * memmem and strstr scan for the needle's first byte and compare at each
  * place it is found; when that does much more work than it advances (the
  * first byte everywhere, long partial matches) they go on by the two-way
- * algorithm, linear in the haystack whatever the needle.
+ * algorithm, linear in the haystack whatever the needle. strstr with a
+ * needle under 16 bytes scans 16 bytes of the haystack at a time itself
+ * (SSE2, the baseline: this unit's own loads, in their pages).
  */
 #include "common.h"
 
@@ -37,15 +39,9 @@ void *str_mempcpy(void *d, const void *s, size_t n) {
     return (u8 *)str_memcpy(d, s, n) + n;
 }
 
-/* The selects (UNPREDICTABLE): whether the string ends within n, whether it
-   fits, whether a delimiter is there, a program decides call by call; a
-   branch on it mispredicted half the time on the workload (strnlen: 40
-   cycles a call against glibc's 14 on Zen 5). */
-size_t str_strnlen(const char *s, size_t n) {
-    const char *z = str_memchr(s, 0, n);
-    return UNPREDICTABLE(z != 0) ? (size_t)(z - s) : n;
-}
-
+/* The selects (UNPREDICTABLE): whether the string fits, whether a delimiter
+   is there, a program decides call by call; a branch on it mispredicts
+   half the time on the workload. */
 char *str_strncat(char *d, const char *s, size_t n) {
     char *e = d + str_strlen(d);
     size_t k = str_strnlen(s, n);
@@ -325,11 +321,69 @@ void *str_memmem(const void *hay, size_t hl, const void *needle, size_t nl) {
     }
 }
 
+/* The haystack from h for a needle of l < 16 bytes, both with 16 bytes of
+   their pages ahead (nv the needle's 16 bytes, need the bits of its l): 16
+   bytes of the haystack at a time, the needle's first byte and the NUL in one
+   mask, a candidate compared with the needle in one 16-byte compare (the
+   haystack's NUL within those bytes differs from the needle's byte there).
+   The loads stay in their pages past the strings' ends, as every first block's
+
+   do. The place found, null for none, or at a page's end the place to go on
+   from by the slower way in *rest. */
+static const u8 *strstr_short(const u8 *h, __m128i nv, u8 n0, unsigned need, const u8 **rest) {
+    __m128i first = splat16(n0);
+
+    while (page_left(h) >= 16) {
+        __m128i hv = load16(h);
+        unsigned z = zero_mask16(hv), stop = eq_mask16(hv, first) | z;
+
+        while (stop) {
+            unsigned i = ctz(stop);
+
+            if (z >> i & 1) {
+                return 0;
+            }
+
+            if (page_left(h + i) < 16) {
+                *rest = h + i;
+                return 0;
+            }
+
+            if ((eq_mask16(load16(h + i), nv) & need) == need) {
+                return h + i;
+            }
+
+            stop &= stop - 1;
+        }
+
+        h += 16;
+    }
+
+    *rest = h;
+    return 0;
+}
+
 char *str_strstr(const char *hay, const char *needle) {
     const u8 *h = (const u8 *)hay, *n = (const u8 *)needle;
 
     if (!n[0]) {
         return (char *)h;
+    }
+
+    if (page_left(n) >= 16) {
+        __m128i nv = load16(n);
+        unsigned nz = zero_mask16(nv);
+
+        if (nz) {
+            const u8 *rest = 0;
+            const u8 *p = strstr_short(h, nv, n[0], (1u << ctz(nz)) - 1, &rest);
+
+            if (p || !rest) {
+                return (char *)p;
+            }
+
+            h = rest;
+        }
     }
 
     u8 first[2];   /* the needle's first byte as a set: strcspn stops at it or at the NUL */

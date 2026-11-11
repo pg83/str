@@ -535,6 +535,128 @@ void *memchr_sse2(const void *p, int c, size_t n) {
     return str_memchr_large(s, (u8)c, n); /* scanned up to a + 16, the kernel's align_down(s + 32, 16) */
 }
 
+/* strnlen: memchr's blocks for the NUL, the offset for the answer (n without
+   one): the first i < n with s[i] == 0, else n. The kernel from the two
+   blocks in line on. */
+size_t strnlen_sse2(const char *str, size_t n) {
+    const u8 *s = (const u8 *)str;
+    unsigned m;
+
+    if (n == 0) {
+        return 0; /* the pointer may be unreadable */
+    }
+
+    size_t left = page_left(s);
+
+    if (left >= 16) {
+        m = zero_mask16(load16(s));
+
+        if (m) {
+            size_t i = ctz(m); /* a NUL past n decides too: none before it */
+            return i < n ? i : n;
+        }
+
+        if (n <= 16) {
+            return n;
+        }
+    } else {
+        m = zero_mask16(load16a(align_down(s, 16))) >> ((uintptr_t)s & 15);
+
+        if (m) {
+            size_t i = ctz(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left) {
+            return n;
+        }
+    }
+
+    /* aligned blocks only from here, as memchr's: the object may end at the NUL */
+    const u8 *a = align_down(s, 16) + 16;
+    m = zero_mask16(load16a(a));
+
+    if (m) {
+        size_t i = (size_t)(a - s) + ctz(m);
+        return i < n ? i : n;
+    }
+
+    if ((size_t)(a - s) + 16 >= n) {
+        return n;
+    }
+
+    return str_strnlen_large(s, s, n); /* scanned up to a + 16, the kernel's align_down(s + 32, 16) */
+}
+
+/* The kernel: strnlen from A = align_down(from, 16) + 32 on (no NUL before
+   it, n past it), memchr_large's blocks for the NUL, the answer the offset
+   from s. */
+size_t strnlen_large_sse2(const u8 *s, const u8 *from, size_t n) {
+    if (n > PTRDIFF_MAX) {
+        n = PTRDIFF_MAX; /* strnlen(s, SIZE_MAX): s + n must not wrap; no string is that long */
+    }
+
+    const u8 *end = s + n, *a = align_down(from + 32, 16);
+
+    while (((uintptr_t)a & 63) && end - a >= 16) {
+        unsigned m = zero_mask16(load16a(a));
+
+        if (m) {
+            return (size_t)(a - s) + ctz(m);
+        }
+
+        a += 16;
+    }
+
+    while (end - a >= 64) {
+        __m128i x0 = load16a(a), x1 = load16a(a + 16), x2 = load16a(a + 32), x3 = load16a(a + 48);
+
+        if (zero_mask16(_mm_min_epu8(_mm_min_epu8(x0, x1), _mm_min_epu8(x2, x3)))) {
+            unsigned m = zero_mask16(x0);
+
+            if (m) {
+                return (size_t)(a - s) + ctz(m);
+            }
+
+            m = zero_mask16(x1);
+
+            if (m) {
+                return (size_t)(a - s) + 16 + ctz(m);
+            }
+
+            m = zero_mask16(x2);
+
+            if (m) {
+                return (size_t)(a - s) + 32 + ctz(m);
+            }
+
+            return (size_t)(a - s) + 48 + ctz(zero_mask16(x3));
+        }
+
+        a += 64;
+    }
+
+    while (end - a >= 16) {
+        unsigned m = zero_mask16(load16a(a));
+
+        if (m) {
+            return (size_t)(a - s) + ctz(m);
+        }
+
+        a += 16;
+    }
+
+    if (a < end) {
+        unsigned m = zero_mask16(load16(end - 16)) >> (16 - (end - a));
+
+        if (m) {
+            return (size_t)(a - s) + ctz(m);
+        }
+    }
+
+    return n;
+}
+
 /* --------------------------------------------------------- strspn/strcspn */
 
 /* 256-entry membership table. Byte stores are independent of each other;

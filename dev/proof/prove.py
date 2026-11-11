@@ -608,6 +608,60 @@ class MemchrLarge(Memchr):
         return {}
 
 
+class Strnlen(Scan):
+    """strnlen(s, n): the offset of the first NUL before n, else n; n == 0
+    reads nothing (s may be unreadable). memchr's blocks for the NUL."""
+    bounded = True
+
+    def params(self):
+        self.n = var('n', 64)
+        return [self.s, self.n]
+
+    def match(self, b):
+        return S.is_zero(b)
+
+    def answer(self, st):
+        r = st.gpr['rax']
+        return S.ult(r, self.n), r
+
+    def contracts(self, img, entry):
+        return {t: self.c_large for t in named_targets(img, entry, ('strnlen_large_',))}
+
+    def c_large(self, prover, st):
+        """strnlen_large(s, from, n), proved on its own (StrnlenLarge): under
+        its precondition (no NUL in [s, A), A = from's 16-byte block plus 32,
+        within 256 bytes of s, n past A - s) strnlen(s, n) itself."""
+        frm = st.gpr['rsi']
+        d = S.add(S.sub(frm, self.s), large_head(frm))  # A - s
+        out = [('strnlen_large is given s', [S.not_(S.eq(st.gpr['rdi'], self.s))]),
+               ('strnlen_large is given from at or past s', [S.ult(frm, self.s)]),
+               ('strnlen_large\'s head within 256 bytes of s', [S.ult(const(64, 256), d)]),
+               ('strnlen_large is given n', [S.not_(S.eq(st.gpr['rdx'], self.n))]),
+               ('strnlen_large\'s n past its head', [S.ule(self.n, d)])]
+        lo = S.sub(st.front_lo, self.s) if st.front_lo is not None else const(64, 0)
+        out.append(('no NUL before strnlen_large\'s head ends', self.some_match(lo, d, st)))
+        return tail_call(self, prover, st, out)
+
+
+class StrnlenLarge(Strnlen):
+    """strnlen_large(s, from, n): strnlen's kernel, under the precondition
+    its callers meet (from at or past s, no NUL in [s, A), A = from's 16-byte
+    block plus 32, within 256 bytes of s, n past A - s): strnlen(s, n). The
+    loads as memchr_large's: aligned, in the pages up to the NUL or of the n
+    bytes."""
+
+    def setup(self, a, align):
+        params, assume = Strnlen.setup(self, a, align)
+        delta = var('fdelta', 64)
+        self.frm = S.add(self.s, delta)
+        d = S.add(delta, large_head(self.frm))
+        return [self.s, self.frm, self.n], assume + [S.ule(d, const(64, 256)), S.ult(d, self.n)] + \
+            [S.or_(S.ule(d, const(64, j)), S.not_(self.at(const(64, j)))) for j in range(256)]
+
+    def contracts(self, img, entry):
+        return {}
+
+
 class StrCompare(Scan):
     """strcmp(a, b): the sign of a[r] - b[r] at the first r where they differ
     or a's is NUL (C11 reads both as if one byte at a time up to there: the
@@ -2171,7 +2225,7 @@ class TruffleScan32:
 
 # ------------------------------------------------------------ derived.c
 
-DERIVED_ENTRIES = ('str_memchr', 'str_strlen', 'str_strspn', 'str_strcspn', 'str_memcpy', 'str_memmove', 'str_memset', 'str_memcmp', 'malloc')
+DERIVED_ENTRIES = ('str_memchr', 'str_strnlen', 'str_strlen', 'str_strspn', 'str_strcspn', 'str_memcpy', 'str_memmove', 'str_memset', 'str_memcmp', 'malloc')
 
 
 class Obj:
@@ -2364,6 +2418,26 @@ class Over:
         self.returns(none, const(64, 0))
         prover.works[-1].append(none)
 
+    def c_strnlen(self, prover, st):
+        """strnlen(p, n) of a bounded object from its start, a way each: r < n,
+        a NUL there, none before (r at or before the stop); n, no NUL in the n
+        bytes (the stop at n)."""
+        p, n = st.gpr['rdi'], st.gpr['rsi']
+        o, off = self.owner_of(p)
+        if o is None or o.n is None or self.tail(st):
+            raise Failure('strnlen of no bounded object, or as a tail call: %r' % p)
+        self.untouched(st, o, 'strnlen')
+        prover.prove(st, [('strnlen is given %s and its n' % o.name, [S.or_(S.not_(S.is_zero(off)), S.not_(S.eq(n, o.n)))])], self.show())
+        r = var('at%d' % (self.calls + 1), 64)
+        none = st.copy()  # the other way, walked later: no NUL in the n bytes, n
+        none.pc.append(S.eq(o.stop, n))
+        self.log(none, 'strnlen', o, S.FALSE, r)
+        st.pc += [S.ult(r, n), S.is_zero(S.select(o.arr, r)), S.ule(r, o.stop)]
+        self.log(st, 'strnlen', o, S.TRUE, r)
+        self.returns(st, r)
+        self.returns(none, n)
+        prover.works[-1].append(none)
+
     def c_strlen(self, prover, st):
         """strlen(p), p at or before its string's NUL: L, a NUL at p + L, none
         before it (at or before that NUL)."""
@@ -2534,23 +2608,9 @@ class OverMempcpy(Over):
                 + self.unchanged(st, self.d)), self.show()
 
 
-class OverStrnlen(Over):
-    """strnlen(s, n): the offset of s's first NUL before n, else n (memchr's
-    answer from s, or n without one); nothing written."""
-
-    def objects(self, a):
-        self.n = var('n', 64)
-        self.s = self.bounded('s', self.n)
-        return [self.s.base, self.n]
-
-    def obligations(self, st):
-        _, _, f, r = self.one(st, 'memchr')
-        return self.answer(st, S.ite(f, r, self.n), 'the answer the first NUL\'s offset, or n') + self.unchanged(st), self.show()
-
-
 class OverStrncat(Over):
     """strncat(d, s, n): d; s's bytes before its first NUL, n at most (k:
-    memchr's answer from s, or n), copied to d's first NUL (L: strlen's
+    strnlen's answer from s), copied to d's first NUL (L: strlen's
     answer) and a NUL after them, nothing else written. d a string with room
     past any NUL of its for any stop of s and a NUL (its capacity cap), s
     bounded by n."""
@@ -2565,7 +2625,7 @@ class OverStrncat(Over):
 
     def obligations(self, st):
         L = self.one(st, 'strlen')[3]
-        _, _, f, r = self.one(st, 'memchr')
+        _, _, f, r = self.one(st, 'strnlen')
         k = S.ite(f, r, self.n)
         want = lambda x: S.ite(X.within(x, L, k), S.select(self.s.arr, S.sub(x, L)),  # noqa: E731
                                S.ite(S.eq(x, S.add(L, k)), const(8, 0), S.select(self.d.arr, x)))
@@ -2594,8 +2654,8 @@ class OverStrlcpy(Over):
 
 
 class OverStrlcat(Over):
-    """strlcat(d, s, n): without a NUL in d's n bytes (memchr's answer null)
-    n + s's length, nothing written; else at d's first NUL r (memchr's) s's
+    """strlcat(d, s, n): without a NUL in d's n bytes (strnlen's answer n)
+    n + s's length, nothing written; else at d's first NUL r (strnlen's) s's
     first k = min(L, n - r - 1) bytes and a NUL, nothing else written, and
     r + L (L: strlen's answer). d bounded by n, its n bytes writable."""
 
@@ -2605,7 +2665,7 @@ class OverStrlcat(Over):
         return [self.d.base, self.s.base, self.n]
 
     def obligations(self, st):
-        _, _, f, r = self.one(st, 'memchr')
+        _, _, f, r = self.one(st, 'strnlen')
         L = self.one(st, 'strlen')[3]
         room = S.sub(S.sub(self.n, r), const(64, 1))
         k = S.ite(S.ult(L, room), L, room)
@@ -2656,7 +2716,7 @@ class OverStrdup(Over):
 
 
 class OverStrndup(Over):
-    """strndup(s, n): l memchr's answer from s, or n; null when malloc's
+    """strndup(s, n): l strnlen's answer from s; null when malloc's
     answer (for l + 1 bytes) is; else m with s's l bytes and a NUL."""
 
     def objects(self, a):
@@ -2666,7 +2726,7 @@ class OverStrndup(Over):
         return [self.s.base, self.n]
 
     def obligations(self, st):
-        _, _, f, r = self.one(st, 'memchr')
+        _, _, f, r = self.one(st, 'strnlen')
         l1 = S.add(S.ite(f, r, self.n), const(64, 1))
         out = [('malloc asked for l + 1 bytes', [S.not_(S.eq(self.one(st, 'malloc')[1], l1))])]
         if not self.calls_of(st, 'memcpy'):
@@ -2787,10 +2847,10 @@ class OverStrtok(OverStrtokR):
         return X.to_bv([S.select(st.mem, self.at(i)) for i in range(8)])
 
 
-SPECS = {'strlen': Strlen, 'strlen_tail': StrlenTail, 'memchr': Memchr, 'memchr_large': MemchrLarge, 'memset': Fill, 'fill_large': FillLarge, 'memcpy': Copy,
+SPECS = {'strlen': Strlen, 'strlen_tail': StrlenTail, 'memchr': Memchr, 'memchr_large': MemchrLarge, 'strnlen': Strnlen, 'strnlen_large': StrnlenLarge,
+         'memset': Fill, 'fill_large': FillLarge, 'memcpy': Copy,
          'memmove': Move, 'copy_large': CopyLarge, 'memcmp': Compare, 'memcmp_large': MemcmpLarge, 'strcmp': StrCompare, 'strcmp_tail': StrCompare, 'strcpy': StrCopy, 'strcpy_long': StrCopyLong, 'strcat': StrCat, 'strspn': Span, 'strcspn': Cspan, 'strspn_long': SpanLong, 'strcspn_long': CspanLong, 'truffle_scan': TruffleScan, 'truffle_scan32': TruffleScan32,
-         'bcmp': OverBcmp, 'bcopy': OverBcopy, 'bzero': OverBzero, 'explicit_bzero': OverBzero, 'mempcpy': OverMempcpy, 'strnlen': OverStrnlen,
-         'strncat': OverStrncat, 'strlcpy': OverStrlcpy, 'strlcat': OverStrlcat, 'strpbrk': OverStrpbrk, 'strsep': OverStrsep, 'strtok_r': OverStrtokR,
+         'bcmp': OverBcmp, 'bcopy': OverBcopy, 'bzero': OverBzero, 'explicit_bzero': OverBzero, 'mempcpy': OverMempcpy, 'strncat': OverStrncat, 'strlcpy': OverStrlcpy, 'strlcat': OverStrlcat, 'strpbrk': OverStrpbrk, 'strsep': OverStrsep, 'strtok_r': OverStrtokR,
          'strtok': OverStrtok, 'strdup': OverStrdup, 'strndup': OverStrndup}
 
 

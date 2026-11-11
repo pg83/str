@@ -124,6 +124,81 @@ void *memchr_evex(const void *p, int c, size_t n) {
     return str_memchr_large(from, (u8)c, n - (size_t)(from - s));
 }
 
+/* strnlen: memchr's blocks for the NUL (memchr_evex), the answer the offset. */
+size_t strnlen_evex(const char *str, size_t n) {
+    const u8 *s = (const u8 *)str;
+    unsigned m;
+
+    if (n == 0) {
+        return 0; /* the pointer may be unreadable */
+    }
+
+    size_t left = page_left(s);
+    const u8 *a = align_down(s, 32) + 32; /* the first aligned block not yet checked */
+
+    if (left >= 32) {
+        m = _mm256_testn_epi8_mask(load256(s), load256(s));
+
+        size_t i = _tzcnt_u32(m); /* 32 for no NUL: no branch on it */
+
+        if (n <= 32) {
+            return i < n ? i : n;
+        }
+
+        if (i < 32) {
+            return i;
+        }
+    } else {
+        m = _mm256_testn_epi8_mask(load256a(align_down(s, 32)), load256a(align_down(s, 32))) >> ((uintptr_t)s & 31);
+
+        if (m) {
+            size_t i = ctz(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left) {
+            return n;
+        }
+
+        /* the next page's first aligned block */
+        m = _mm256_testn_epi8_mask(load256a(s + left), load256a(s + left));
+
+        if (m) {
+            size_t i = left + ctz(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left + 32) {
+            return n;
+        }
+
+        a = s + left + 32;
+    }
+
+    /* C11 lets the object end at the match, n past it: from here no load may
+       reach a page past the one holding the first byte not yet checked, so
+       aligned blocks only (the last-W-bytes loads this had did: a fault next
+       to an unmapped page, dev/proof found it) */
+
+    for (int k = 0; k < 2; k++, a += 32) { /* two blocks in line: every n up to 64 decided here */
+        m = _mm256_testn_epi8_mask(load256a(a), load256a(a));
+
+        if (m) {
+            size_t i = (size_t)(a - s) + ctz(m);
+            return i < n ? i : n;
+        }
+
+        if ((size_t)(a - s) + 32 >= n) {
+            return n;
+        }
+    }
+
+    /* the kernel goes on where these stopped: from the last block checked
+       (its first 32 bytes, scanned), so it starts at a */
+    const u8 *from = a - 32;
+    return str_strnlen_large(s, from, n);
+}
+
 /* --------------------------------------------------------------- compare */
 
 /* 16 bytes first: at a few bytes a 32-byte block costs more than it saves. */

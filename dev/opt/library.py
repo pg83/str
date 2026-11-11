@@ -33,7 +33,7 @@ from .pipeline import optimize
 
 UNITS = [('sse2', 'sse2'), ('sse42', 'sse42'), ('avx2', 'avx2'), ('evex', 'evex'), ('evex512', 'evex512'), ('dispatch', 'sse2'), ('derived', 'sse2')]
 JCC = '_jcc'
-PUBLIC = ('memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr')  # the rest are kernels
+PUBLIC = ('memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'strnlen')  # the rest are kernels
 
 
 class Config:

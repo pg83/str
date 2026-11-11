@@ -252,6 +252,8 @@ static void suite(int full) {
 
                 s[n] = 0;
                 CHECK(T->strlen((char *)s) == n);
+                CHECK(T->strnlen((char *)s, n + 2) == n && T->strnlen((char *)s, n) == n && T->strnlen((char *)s, n / 2) == n / 2);
+                CHECK(T->strnlen((char *)s, SIZE_MAX) == n && T->strnlen((char *)s, 0) == 0);
                 memset(d, 0x55, n + 2);
                 CHECK(T->strcpy((char *)d, (char *)s) == (char *)d);
                 CHECK(!memcmp(d, s, n + 1) && d[n + 1] == 0x55);
@@ -391,6 +393,7 @@ static void suite(int full) {
                 CHECK(!memcmp(d, ref, n) && d[n] == 0x55);
                 s[n] = 0;
                 CHECK(T->strlen((char *)s) == n);
+                CHECK(T->strnlen((char *)s, n + 1) == n && T->strnlen((char *)s, n + 4096) == n && T->strnlen((char *)s, n - n / 3) == n - n / 3);
                 CHECK(T->strcpy((char *)d, (char *)s) == (char *)d && !memcmp(d, s, n + 1));
                 CHECK(T->strcmp((char *)s, (char *)d) == 0);
 
@@ -459,6 +462,8 @@ guards:;
                 CHECK(sign(T->memcmp(s, d, n)) == sign(memcmp(s, d, n)));
                 s[at[i]] = 0; /* a string ending there */
                 CHECK(T->strlen((char *)s) == strlen((char *)s));
+                CHECK(T->strnlen((char *)s, n) == strnlen((char *)s, n) && T->strnlen((char *)s, at[i]) == at[i]);
+                CHECK(T->strnlen((char *)s, n + 100) == strnlen((char *)s, n) && T->strnlen((char *)s, k + 1) == strnlen((char *)s, k + 1));
                 CHECK(sign(T->strcmp((char *)s, (char *)d)) == sign(strcmp((char *)s, (char *)d)));
                 /* copied and appended: the first block cut short by the page end, the NUL past it */
                 unsigned char *t = ref2 + 64, *u = ref2 + 4096;
@@ -501,6 +506,8 @@ guards:;
                long kernels did, dev/proof found it) */
             CHECK(T->memchr(s, 0, n + 1000) == memchr(s, 0, n));
             CHECK(T->memchr(s, 0, SIZE_MAX) == memchr(s, 0, n));
+            CHECK(T->strnlen((char *)s, n) == n - 1 && T->strnlen((char *)s, n - 1) == n - 1 && T->strnlen((char *)s, n + 1000) == n - 1);
+            CHECK(T->strnlen((char *)s, SIZE_MAX) == n - 1);
             CHECK(T->memchr(s, s[0], n) == s);
             CHECK(T->memchr(s, 0x9a, n - 1) == memchr(s, 0x9a, n - 1));
             CHECK(T->strcpy((char *)d, (char *)s) == (char *)d && !memcmp(d, s, n));

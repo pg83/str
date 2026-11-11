@@ -396,6 +396,146 @@ void *memchr_large_avx2(const u8 *s, u8 c, size_t n) {
     return 0;
 }
 
+/* strnlen: memchr's blocks for the NUL (strnlen_sse2), the answer the offset. */
+size_t strnlen_avx2(const char *str, size_t n) {
+    const u8 *s = (const u8 *)str;
+    __m256i zero = _mm256_setzero_si256();
+    unsigned m;
+
+    if (n == 0) {
+        return 0; /* the pointer may be unreadable */
+    }
+
+    size_t left = page_left(s);
+    const u8 *a = align_down(s, 32) + 32; /* the first aligned block not yet checked */
+
+    if (left >= 32) {
+        m = mask256(_mm256_cmpeq_epi8(load256(s), zero));
+
+        size_t i = _tzcnt_u32(m); /* 32 for no NUL: no branch on it */
+
+        if (n <= 32) {
+            return i < n ? i : n;
+        }
+
+        if (i < 32) {
+            return i;
+        }
+    } else {
+        m = mask256(_mm256_cmpeq_epi8(load256a(align_down(s, 32)), zero)) >> ((uintptr_t)s & 31);
+
+        if (m) {
+            size_t i = ctz(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left) {
+            return n;
+        }
+
+        /* the next page's first aligned block */
+        m = mask256(_mm256_cmpeq_epi8(load256a(s + left), zero));
+
+        if (m) {
+            size_t i = left + ctz(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left + 32) {
+            return n;
+        }
+
+        a = s + left + 32;
+    }
+
+    /* aligned blocks only from here, as memchr's: the object may end at the NUL */
+
+    for (int k = 0; k < 2; k++, a += 32) { /* two blocks in line: every n up to 64 decided here */
+        m = mask256(_mm256_cmpeq_epi8(load256a(a), zero));
+
+        if (m) {
+            size_t i = (size_t)(a - s) + ctz(m);
+            return i < n ? i : n;
+        }
+
+        if ((size_t)(a - s) + 32 >= n) {
+            return n;
+        }
+    }
+
+    return str_strnlen_large(s, a - 32, n); /* the kernel from the last block checked (its first 32 bytes, scanned) */
+}
+
+/* The kernel: strnlen from A = align_down(from, 16) + 32 on (no NUL before
+   it, n past it), memchr_large's blocks for the NUL, the answer the offset
+   from s. */
+size_t strnlen_large_avx2(const u8 *s, const u8 *from, size_t n) {
+    if (n > PTRDIFF_MAX) {
+        n = PTRDIFF_MAX; /* strnlen(s, SIZE_MAX): s + n must not wrap; no string is that long */
+    }
+
+    __m256i zero = _mm256_setzero_si256();
+    const u8 *end = s + n, *a = align_down(from + 32, 32);
+
+    while (((uintptr_t)a & 127) && end - a >= 32) {
+        unsigned m = mask256(_mm256_cmpeq_epi8(load256a(a), zero));
+
+        if (m) {
+            return (size_t)(a - s) + ctz(m);
+        }
+
+        a += 32;
+    }
+
+    while (end - a >= 128) {
+        __m256i x0 = load256a(a), x1 = load256a(a + 32), x2 = load256a(a + 64), x3 = load256a(a + 96);
+
+        if (mask256(_mm256_cmpeq_epi8(_mm256_min_epu8(_mm256_min_epu8(x0, x1), _mm256_min_epu8(x2, x3)), zero))) {
+            unsigned m = mask256(_mm256_cmpeq_epi8(x0, zero));
+
+            if (m) {
+                return (size_t)(a - s) + ctz(m);
+            }
+
+            m = mask256(_mm256_cmpeq_epi8(x1, zero));
+
+            if (m) {
+                return (size_t)(a - s) + 32 + ctz(m);
+            }
+
+            m = mask256(_mm256_cmpeq_epi8(x2, zero));
+
+            if (m) {
+                return (size_t)(a - s) + 64 + ctz(m);
+            }
+
+            return (size_t)(a - s) + 96 + ctz(mask256(_mm256_cmpeq_epi8(x3, zero)));
+        }
+
+        a += 128;
+    }
+
+    while (end - a >= 32) {
+        unsigned m = mask256(_mm256_cmpeq_epi8(load256a(a), zero));
+
+        if (m) {
+            return (size_t)(a - s) + ctz(m);
+        }
+
+        a += 32;
+    }
+
+    if (a < end) {
+        unsigned m = mask256(_mm256_cmpeq_epi8(load256(end - 32), zero)) >> (32 - (end - a));
+
+        if (m) {
+            return (size_t)(a - s) + ctz(m);
+        }
+    }
+
+    return n;
+}
+
 /* One 32-byte block first, whatever n: unaligned when the page allows, and
    the index of the first match (32 for none) against n, which settles
    everything up to 32 bytes. Near the page end the aligned block around s,

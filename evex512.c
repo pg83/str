@@ -202,6 +202,81 @@ void *memchr_evex512(const void *p, int c, size_t n) {
     return str_memchr_large(from, (u8)c, n - (size_t)(from - s));
 }
 
+/* strnlen: memchr's blocks for the NUL (memchr_evex512), the answer the offset. */
+size_t strnlen_evex512(const char *str, size_t n) {
+    const u8 *s = (const u8 *)str;
+    unsigned long long m;
+
+    if (n == 0) {
+        return 0; /* the pointer may be unreadable */
+    }
+
+    size_t left = page_left(s);
+    const u8 *a = align_down(s, 64) + 64; /* the first aligned block not yet checked */
+
+    if (left >= 64) {
+        m = zero_mask64(load512(s));
+
+        size_t i = _tzcnt_u64(m); /* 64 for no NUL: no branch on it */
+
+        if (n <= 64) {
+            return i < n ? i : n;
+        }
+
+        if (i < 64) {
+            return i;
+        }
+    } else {
+        m = zero_mask64(load512a(align_down(s, 64))) >> ((uintptr_t)s & 63);
+
+        if (m) {
+            size_t i = ctz64(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left) {
+            return n;
+        }
+
+        /* the next page's first aligned block */
+        m = zero_mask64(load512a(s + left));
+
+        if (m) {
+            size_t i = left + ctz64(m);
+            return i < n ? i : n;
+        }
+
+        if (n <= left + 64) {
+            return n;
+        }
+
+        a = s + left + 64;
+    }
+
+    /* C11 lets the object end at the match, n past it: from here no load may
+       reach a page past the one holding the first byte not yet checked, so
+       aligned blocks only (the last-W-bytes loads this had did: a fault next
+       to an unmapped page, dev/proof found it) */
+
+    for (int k = 0; k < 2; k++, a += 64) { /* two blocks in line: every n up to 128 decided here */
+        m = zero_mask64(load512a(a));
+
+        if (m) {
+            size_t i = (size_t)(a - s) + ctz64(m);
+            return i < n ? i : n;
+        }
+
+        if ((size_t)(a - s) + 64 >= n) {
+            return n;
+        }
+    }
+
+    /* the kernel goes on where these stopped: from the last block checked
+       (its first 32 bytes, scanned), so it starts at a */
+    const u8 *from = a - 32;
+    return str_strnlen_large(s, from, n);
+}
+
 /* ------------------------------------------------------------------ copy */
 
 static inline void *copy(u8 *d, const u8 *s, size_t n) {

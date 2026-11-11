@@ -21,6 +21,8 @@ FUNCS = {
                'evex512': 'evex512.strlen_evex512'},
     'memchr': {'sse2': 'sse2.memchr_sse2', 'sse42': 'sse42.memchr_sse2', 'avx2': 'avx2.memchr_avx2', 'evex': 'evex.memchr_evex',
                'evex512': 'evex512.memchr_evex512'},
+    'strnlen': {'sse2': 'sse2.strnlen_sse2', 'sse42': 'sse42.strnlen_sse2', 'avx2': 'avx2.strnlen_avx2', 'evex': 'evex.strnlen_evex',
+                'evex512': 'evex512.strnlen_evex512'},
     'memset': {'sse2': 'sse2.memset_sse2', 'sse42': 'sse42.memset_sse2', 'avx2': 'avx2.memset_avx2', 'evex': 'evex.memset_evex512',
                'evex512': 'evex512.memset_evex512'},
     'memcpy': {'sse2': 'sse2.memcpy_sse2', 'sse42': 'sse42.memcpy_sse2', 'avx2': 'avx2.memcpy_avx2', 'evex': 'evex.memcpy_evex512',
@@ -49,6 +51,7 @@ FUNCS['strcspn_long'] = dict(FUNCS['strcspn'])
 # the kernels the public functions hand their long cases to (str_table's), each proved apart under its contract's
 # precondition, the caller taking it by that contract
 _K = {'strlen_tail': ('strlen_tail_sse2', 'strlen_tail_avx2', 'strlen_tail_evex512'), 'memchr_large': ('memchr_large_sse2', 'memchr_large_avx2'),
+      'strnlen_large': ('strnlen_large_sse2', 'strnlen_large_avx2'),
       'fill_large': ('fill_large_sse2', 'fill_large_avx2', 'fill_large_evex512'), 'copy_large': ('copy_large_sse2', 'copy_large_avx2'),
       'memcmp_large': ('memcmp_large_sse2', 'memcmp_large_avx2')}
 _KCONF = {'sse2': 0, 'sse42': 0, 'avx2': 1, 'evex': 1, 'evex512': -1}  # which of a kernel's copies each configuration names
@@ -77,12 +80,12 @@ SPLIT = {
 
 # (spec, config) -> the configuration whose copy has the same code
 SAME = {
-    **{(s, 'sse42'): 'sse2' for s in ('strlen', 'memchr', 'memset', 'memcpy', 'memmove', 'memcmp', 'strcmp', 'strcmp_tail', 'strcpy', 'strcpy_long',
+    **{(s, 'sse42'): 'sse2' for s in ('strlen', 'memchr', 'strnlen', 'memset', 'memcpy', 'memmove', 'memcmp', 'strcmp', 'strcmp_tail', 'strcpy', 'strcpy_long',
                                       'strcat')},
     **{(s, 'evex512'): 'avx2' for s in ('truffle_scan', 'truffle_scan32')},
     **{(s, 'sse42'): 'sse2' for s in _K},
     **{(s, 'evex512'): 'evex' for s in ('memcpy', 'memmove', 'memcmp')},
-    ('memchr_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512'): 'avx2', ('fill_large', 'evex'): 'avx2',
+    ('memchr_large', 'evex512'): 'avx2', ('strnlen_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512'): 'avx2', ('fill_large', 'evex'): 'avx2',
 }
 
 # (spec, config) -> the set length strspn's and strcspn's short spec ends at, the long one taking the longer
@@ -94,26 +97,27 @@ SETMAX = {(s, 'sse2'): 1 for s in ('strspn', 'strcspn', 'strspn_long', 'strcspn_
 # derived.c: one copy for every configuration (it calls the entry points, so the table), its spec ->
 # its symbol; the slots' specs it takes by their contracts, each slot's implementation in every
 # configuration proved by them (strspn's and strcspn's: their short and their long sets)
-DERIVED = {s: 'str_' + s for s in ('bcmp', 'bcopy', 'bzero', 'explicit_bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat',
+DERIVED = {s: 'str_' + s for s in ('bcmp', 'bcopy', 'bzero', 'explicit_bzero', 'mempcpy', 'strncat', 'strlcpy', 'strlcat',
                                    'strpbrk', 'strsep', 'strtok_r', 'strtok', 'strdup', 'strndup')}
 DERIVED_DEPS = {'bcmp': ('memcmp',), 'bcopy': ('memmove',), 'bzero': ('memset',), 'explicit_bzero': ('memset',), 'mempcpy': ('memcpy',),
-                'strnlen': ('memchr',), 'strncat': ('strlen', 'memchr', 'memcpy'), 'strlcpy': ('strlen', 'memcpy'),
-                'strlcat': ('memchr', 'strlen', 'memcpy'), 'strpbrk': ('strcspn', 'strcspn_long'), 'strsep': ('strcspn', 'strcspn_long'),
+                'strncat': ('strlen', 'strnlen', 'memcpy'), 'strlcpy': ('strlen', 'memcpy'),
+                'strlcat': ('strnlen', 'strlen', 'memcpy'), 'strpbrk': ('strcspn', 'strcspn_long'), 'strsep': ('strcspn', 'strcspn_long'),
                 'strtok_r': ('strspn', 'strspn_long', 'strcspn', 'strcspn_long'), 'strtok': ('strspn', 'strspn_long', 'strcspn', 'strcspn_long'),
-                'strdup': ('strlen', 'memcpy'), 'strndup': ('memchr', 'memcpy')}
+                'strdup': ('strlen', 'memcpy'), 'strndup': ('strnlen', 'memcpy')}
 DERIVED_CASES = {'strtok_r': 2, 'strtok': 2}  # the classes: s a string, or s null and the saved pointer's
 SLOT_SPECS = {'strspn': ('strspn', 'strspn_long'), 'strcspn': ('strcspn', 'strcspn_long')}  # a slot's specs, all of them its implementations'
 
 DEPS = {'strcat': ('strlen', 'strcpy', 'strcpy_long'), 'strcmp': ('strcmp_tail',), 'strcpy': ('strcpy_long',), 'truffle_scan32': ('truffle_scan',),
-        'strlen': ('strlen_tail',), 'memchr': ('memchr_large',), 'memset': ('fill_large',), 'memcpy': ('copy_large',), 'memmove': ('copy_large',),
+        'strlen': ('strlen_tail',), 'memchr': ('memchr_large',), 'strnlen': ('strnlen_large',), 'memset': ('fill_large',), 'memcpy': ('copy_large',),
+        'memmove': ('copy_large',),
         'memcmp': ('memcmp_large',)}
 TRUFFLE_DEPS = {'strspn': ('truffle_scan32',), 'strcspn': ('truffle_scan32', 'strlen')}
 
 # the order the ready proofs start in, the longest first (hours to tens of
 # hours on the lab, the classes of a split each a part of their function's)
-SLOW = ('strspn', 'strcspn', 'strcpy_long', 'strcmp_tail', 'strcmp', 'strcpy', 'memchr', 'memcmp', 'strspn_long', 'strcspn_long', 'strcat',
-        'memmove', 'memcpy', 'memset', 'strlen', 'truffle_scan', 'truffle_scan32', 'memchr_large', 'memcmp_large', 'copy_large', 'strlen_tail',
-        'fill_large')
+SLOW = ('strspn', 'strcspn', 'strcpy_long', 'strcmp_tail', 'strcmp', 'strcpy', 'memchr', 'strnlen', 'memcmp', 'strspn_long', 'strcspn_long', 'strcat',
+        'memmove', 'memcpy', 'memset', 'strlen', 'truffle_scan', 'truffle_scan32', 'memchr_large', 'strnlen_large', 'memcmp_large', 'copy_large',
+        'strlen_tail', 'fill_large')
 
 
 def deps(spec, config):
