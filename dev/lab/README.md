@@ -88,9 +88,13 @@ caches all of it by content.
   long strspn/strcspn ones, each kernel, 7 passes, checksums against glibc.
   `--mixed`: the whole workload, each call's function drawn by the mix's
   weights, for whole tables: every configuration of ours, glibc as
-  dispatched, and `--table NAME=CONFIG:SLOT=FN,...` (a configuration with
-  slots replaced; a public slot takes any kernel of its primitive by
-  symbol). In the mix each function's branches see the others' in the
+  dispatched, and `--table NAME=CONFIG:SLOT=FN,...` (a configuration through
+  the table, as `ours/CONFIG.t`, with slots replaced: a kernel slot as well
+  as a public one, which takes any kernel of its primitive by symbol;
+  `NAME=CONFIG:` replaces nothing and is the reference with the same calls.
+  A configuration's own copies call their kernels directly, so a kernel
+  replaced in their table would not be reached: until 2026-11-11 it was
+  not, and such a table measured the configuration as it was). In the mix each function's branches see the others' in the
   history and the store buffer drains between calls: the per-function trace
   of memset is a benchmark of back-to-back memsets, where the order of the
   stores counts 1.3x, and the mix is not (there the branches on the size

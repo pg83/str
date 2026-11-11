@@ -196,6 +196,31 @@ static unsigned slot_fn_needs(int slot, void *fn) {
     return 0;
 }
 
+/* A configuration's table with every slot's plain implementation in place of
+   the post pass's copy for the configuration: the copies call each other
+   directly, the plain ones through str_table, so a kernel replaced in the
+   table is the one the public functions reach. */
+static void through_table(struct str_table *t, const char *config) {
+    int jcc = 0; /* the post pass laid this configuration out with the JCC padding: its copies are the *_jcc code */
+
+    for (int i = 0; kl_jcc_configs[i]; i++) {
+        jcc |= !strcmp(kl_jcc_configs[i], config);
+    }
+
+    for (int s = 0; s < NSLOTS; s++) {
+        const char *nm = slot_fn_name(s, ((void **)t)[s]);
+        const char *dot = strchr(nm, '.');
+        char want[160];
+        snprintf(want, sizeof want, "%s%s", dot ? dot + 1 : "", jcc ? "_jcc" : "");
+
+        for (unsigned i = 0; dot && i < kl_nslots; i++) {
+            if (kl_slots[i].slot == s && !kl_slots[i].spec && !strcmp(kl_slots[i].name, want)) {
+                ((void **)t)[s] = kl_slots[i].fn;
+            }
+        }
+    }
+}
+
 /* The slots a primitive's calls go through: its own, then the kernels behind it. */
 static int prim_slots(int p, int *out) {
     int n = 0;
@@ -280,25 +305,7 @@ static void build_kernels(void) {
        replaced by every other implementation of the slot */
     base_config = str_choose();
     struct str_table plain = base_config->table;
-
-    int jcc = 0; /* the post pass laid this configuration out with the JCC padding: its copies are the *_jcc code */
-
-    for (int i = 0; kl_jcc_configs[i]; i++) {
-        jcc |= !strcmp(kl_jcc_configs[i], base_config->name);
-    }
-
-    for (int s = 0; s < NSLOTS; s++) {
-        const char *nm = slot_fn_name(s, ((void **)&plain)[s]);
-        const char *dot = strchr(nm, '.');
-        char want[160];
-        snprintf(want, sizeof want, "%s%s", dot ? dot + 1 : "", jcc ? "_jcc" : "");
-
-        for (unsigned i = 0; dot && i < kl_nslots; i++) {
-            if (kl_slots[i].slot == s && !kl_slots[i].spec && !strcmp(kl_slots[i].name, want)) {
-                ((void **)&plain)[s] = kl_slots[i].fn;
-            }
-        }
-    }
+    through_table(&plain, base_config->name);
 
     for (int p = 0; p < P_N; p++) {
         for (unsigned c = 0; c < str_nconfigs; c++) {
@@ -1794,6 +1801,11 @@ static void build_tables(void) {
         }
 
         CHECK(found);
+        /* through the table, as ours/CONFIG.t: a kernel slot replaced in the
+           configuration's own copies would not be reached (they call their
+           kernels directly); NAME=CONFIG: with nothing replaced is the
+           reference with the same calls */
+        through_table(&x->t, eq + 1);
 
         for (char *a = strtok_r(colon + 1, ",", &sv); a; a = strtok_r(0, ",", &sv)) {
             char *e = strchr(a, '=');
