@@ -2226,7 +2226,9 @@ class ExecService:
         except OSError:
             return
         for sibling in siblings:
-            if sibling == self.session:
+            # sessions' directories only: the base is also the nodes' HOME,
+            # what they keep there across sessions (dev/proof's answer cache)
+            if sibling == self.session or not re.fullmatch(r"[0-9a-f]{32}", sibling.name):
                 continue
             try:
                 if sibling.is_dir() and sibling.stat().st_mtime < cutoff:
