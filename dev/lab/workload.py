@@ -28,10 +28,22 @@ the automemcpy paper's published histograms, which a log-normal matches within
     the branch predictor learns the replayed sequence (a trace of 5 000 strcat
     calls: glibc's size branches at 0.05 mispredictions a call).
   working set - 2 MiB of sources and 2 MiB of destinations, L2-sized.
+  the tail - above 4 KiB a program's copies and fills fall off as a power,
+    not as a log-normal (whose 0.1% of them past 4 KiB this capped at 4 KiB
+    until 2026-11-11, so that copy_huge and fill_huge were never weighed): of
+    pizdos's 20 programs (pizdos.py trace) the median one makes some 0.3%
+    of its memcpy, memmove and memset calls longer than 4 KiB, P(N > n) ~
+    n^-1 beyond, and the longest are its decoders' canvases of 15 MB. So
+    0.3% of those calls get a size of 4 KiB * 1/u, u uniform, up to 8 MiB,
+    drawn with an RNG of their own (the rest of the trace is as it was), at
+    random places in regions of BIG bytes past each pool.
 
 File format (little-endian): 'STRW' u32 version u64 src_size u64 dst_size
-u32 ntraces, the two pool images, then per trace u32 namelen name u64 count
-and count records of {u8 op, u8[3] zero, u32 n, u64 a, u64 b}.
+u32 ntraces, version 3: u64 src_zeros u64 dst_zeros, the two pool images
+(each pool src_size + src_zeros bytes, those zeros not stored), then per
+trace u32 namelen name u64 count and count records of {u8 op, u8[3] zero,
+u32 n, u64 a, u64 b}. Version 2 (pizdos.py trace): no images at all, the
+pools zeros.
 """
 import math
 import random
@@ -51,6 +63,11 @@ PER_FUNCTION = 1 << 17
 
 # median, sigma of ln n, share of zero-length calls: the log-normal fits of the measured data
 LOGNORMAL = {'string': (8, 1.2, 0.04), 'memcpy': (16, 1.8, 0.025), 'memmove': (14, 1.3, 0.01), 'memcmp': (14, 0.95, 0.001), 'memset': (29, 1.6, 0.007)}
+# the share of calls past 4 KiB, their P(N > n) = (n / 4 KiB)^-TAIL_POWER, the longest
+TAIL = {'memcpy': 0.003, 'memmove': 0.003, 'memset': 0.003}
+TAIL_POWER = 1.0
+TAIL_MAX = 8 << 20
+BIG = 16 << 20   # the region of the tail's blocks past each pool
 
 
 def make_draw(rng):
@@ -91,6 +108,7 @@ def text(rng, n):
 
 def generate(seed=1, records=RECORDS, per_function=PER_FUNCTION):
     rng = random.Random(seed)
+    tail_rng = random.Random(seed + 1000)
     src, dst = Pool(SRC_SIZE), Pool(DST_SIZE)
     draw = make_draw(rng)
     sets = {'ws': src.place(b' \t\0', rng), 'd1': src.place(b',\0', rng), 'd2': src.place(b';\0', rng), 'd3': src.place(b'=\t\0', rng), 'd4': src.place(b' ,;\0', rng)}
@@ -149,6 +167,16 @@ def generate(seed=1, records=RECORDS, per_function=PER_FUNCTION):
         s = text(rng, n) + delim + text(rng, rng.randrange(8)) + b'\0'
         objects['strcspn'].append((n, src.place(s, rng), sets[setname]))
     def record(op):
+        r = body(op)
+        if op in TAIL and tail_rng.random() < TAIL[op]:
+            # the tail: the call's size and places from tail_rng, past the pools; the
+            # rest of the trace draws from rng as without it
+            n = min(TAIL_MAX, max(4097, int(4096 / (1 - tail_rng.random()) ** (1 / TAIL_POWER))))
+            a, b = SRC_SIZE + tail_rng.randrange(BIG - n), DST_SIZE + tail_rng.randrange(BIG - n)
+            return (op, n, r[2], b) if op == 'memset' else (op, n, a, b)
+        return r
+
+    def body(op):
         if op in ('memcpy', 'memmove'):
             n = draw(op)
             align = 8 if rng.random() < 0.5 else 1
@@ -199,7 +227,7 @@ def generate(seed=1, records=RECORDS, per_function=PER_FUNCTION):
 def write(path, seed=1):
     src, dst, traces = generate(seed)
     with open(path, 'wb') as f:
-        f.write(b'STRW' + struct.pack('<IQQI', 1, len(src), len(dst), len(traces)))
+        f.write(b'STRW' + struct.pack('<IQQI', 3, len(src), len(dst), len(traces)) + struct.pack('<QQ', BIG, BIG))
         f.write(src)
         f.write(dst)
         for name, records in traces:

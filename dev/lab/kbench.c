@@ -2090,12 +2090,24 @@ static void traces(const char *path, int passes) {
     uint64_t ssz, dsz;
     CHECK(fread(magic, 1, 4, f) == 4 && !memcmp(magic, "STRW", 4));
     CHECK(fread(&version, 4, 1, f) == 1 && fread(&ssz, 8, 1, f) == 1 && fread(&dsz, 8, 1, f) == 1 && fread(&ntraces, 4, 1, f) == 1 &&
-          (version == 1 || version == 2));
-    u8x *src, *dst, *image;
-    CHECK(!posix_memalign((void **)&src, 4096, ssz) && !posix_memalign((void **)&dst, 4096, dsz) && !posix_memalign((void **)&image, 4096, dsz));
+          version >= 1 && version <= 3);
+    /* version 3: each pool continues in zeros, not in the file (the workload's tail of large blocks) */
+    uint64_t szero = 0, dzero = 0;
 
-    if (version == 1) {
+    if (version == 3) {
+        CHECK(fread(&szero, 8, 1, f) == 1 && fread(&dzero, 8, 1, f) == 1);
+    }
+
+    u8x *src, *dst, *image;
+    CHECK(!posix_memalign((void **)&src, 4096, ssz + szero) && !posix_memalign((void **)&dst, 4096, dsz + dzero) &&
+          !posix_memalign((void **)&image, 4096, dsz + dzero));
+
+    if (version != 2) {
         CHECK(fread(src, 1, ssz, f) == ssz && fread(image, 1, dsz, f) == dsz);
+        memset(src + ssz, 0, szero);
+        memset(image + dsz, 0, dzero);
+        ssz += szero;
+        dsz += dzero;
     } else {
         /* version 2 (pizdos.py trace: programs' calls of memcpy, memmove and
            memset, whose bytes do not matter): the pools are zeros, not in the
@@ -2117,7 +2129,7 @@ static void traces(const char *path, int passes) {
         Rec *recs = malloc(count * sizeof *recs);
         CHECK(recs && fread(recs, sizeof *recs, count, f) == count);
         int p = trace_prim(name);
-        size_t reset = version == 1 ? dsz : written(recs, count, dsz);
+        size_t reset = version != 2 ? dsz : written(recs, count, dsz);
 
         if (count && (want_libs || (want_mixed && !strcmp(name, "mixed")))) {
             tables_trace(name, recs, count, src, dst, image, reset, passes);

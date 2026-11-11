@@ -27,10 +27,14 @@ def read(path):
     b = Path(path).read_bytes()
     assert b[:4] == b'STRW'
     version, ssz, dsz, nt = struct.unpack_from('<IQQI', b, 4)
-    assert version in (1, 2)
+    assert version in (1, 2, 3)
     o = 4 + struct.calcsize('<IQQI')
-    pools = b[o:o + ssz + dsz] if version == 1 else b''   # version 2: zeros, not stored
-    o += len(pools)
+    zeros = b''
+    if version == 3:   # each pool's continuation in zeros, not stored
+        zeros = b[o:o + 16]
+        o += 16
+    pools = zeros + b[o:o + ssz + dsz] if version != 2 else b''   # version 2: zeros, not stored
+    o += len(pools) - len(zeros)
     traces = []
     for _ in range(nt):
         nl, = struct.unpack_from('<I', b, o)
