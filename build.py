@@ -232,7 +232,8 @@ proof_solvers = command(
     color="cyan",
     local=True,
 )
-proof_inputs = [f"$(S)/dev/proof/{f}.py" for f in ("node", "prove", "machine", "smt", "run", "targets")] + ["$(S)/dev/x86.py", "$(S)/dev/elf.py"]
+proof_inputs = [f"$(S)/dev/proof/{f}.py" for f in ("node", "prove", "machine", "smt", "run", "targets")] + ["$(S)/dev/x86.py", "$(S)/dev/elf.py",
+                                                                                                         "$(S)/common.h"]  # node.py: str_table's slots
 proof_env = {"STR_PROOF_WORKERS": build.flags.proof_workers, "STR_PROOF_TIMEOUT": build.flags.proof_timeout,
              "STR_PROOF_MEMORY": build.flags.proof_memory, "STR_PROOF_NODE_TIMEOUT": build.flags.proof_node_timeout,
              "STR_PROOF_CACHE": build.flags.proof_cache}

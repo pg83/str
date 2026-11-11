@@ -624,6 +624,13 @@ class Strnlen(Scan):
         r = st.gpr['rax']
         return S.ult(r, self.n), r
 
+    def obligations(self, st):
+        """The scan's, and without a NUL in the n bytes the answer n itself
+        (the scan's own say no more than r >= n there)."""
+        out, show = Scan.obligations(self, st)
+        r = st.gpr['rax']
+        return out + [('the answer n without a NUL in the n bytes', [S.ule(self.n, r), S.not_(S.eq(r, self.n))])], show
+
     def contracts(self, img, entry):
         return {t: self.c_large for t in named_targets(img, entry, ('strnlen_large_',))}
 
@@ -652,10 +659,10 @@ class StrnlenLarge(Strnlen):
 
     def setup(self, a, align):
         params, assume = Strnlen.setup(self, a, align)
-        delta = var('fdelta', 64)
+        delta = var('fdelta', 64)  # from - s, at most 256: from at or past s, no wrap (A = s then: no head, z = 0 allowed, its first counterexample)
         self.frm = S.add(self.s, delta)
         d = S.add(delta, large_head(self.frm))
-        return [self.s, self.frm, self.n], assume + [S.ule(d, const(64, 256)), S.ult(d, self.n)] + \
+        return [self.s, self.frm, self.n], assume + [S.ule(delta, const(64, 256)), S.ule(d, const(64, 256)), S.ult(d, self.n)] + \
             [S.or_(S.ule(d, const(64, j)), S.not_(self.at(const(64, j)))) for j in range(256)]
 
     def contracts(self, img, entry):
