@@ -818,7 +818,7 @@ class Machine:
         nxt = j['offset'] + j['len']
         if j.get('op_mask') not in (None, 'none') and mn not in MASKED:
             raise Unsupported('%s with a mask at %#x' % (mn, st.rip))
-        if mn.startswith('nop') or mn in ('endbr64',):
+        if mn.startswith('nop') or mn in ('endbr64', 'sfence'):  # sfence: the non-temporal stores ordered before the later ones, one thread's state as it was
             st.rip = nxt
             return [(st, S.TRUE)]
         if mn == 'ret':
@@ -1181,6 +1181,11 @@ class Machine:
         self._vmov(st, j, ops, True)
 
     i_vmovdqa32 = i_vmovdqa = i_vmovaps = i_movdqa = i_movaps = i_vmovdqa64
+
+    def i_vmovntdq(self, st, j, ops):  # a non-temporal store: a store to memory, aligned (#GP otherwise); the order sfence gives
+        self._vmov(st, j, ops, True)
+
+    i_movntdq = i_vmovntdq
 
     def _vtestnm(self, st, j, ops, want_zero):
         n = self._width(ops)

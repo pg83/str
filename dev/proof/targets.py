@@ -85,7 +85,7 @@ SAME = {
     **{(s, 'evex512'): 'avx2' for s in ('truffle_scan', 'truffle_scan32')},
     **{(s, 'sse42'): 'sse2' for s in _K},
     **{(s, 'evex512'): 'evex' for s in ('memcpy', 'memmove', 'memcmp')},
-    ('memchr_large', 'evex512'): 'avx2', ('strnlen_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512'): 'avx2', ('fill_large', 'evex'): 'avx2',
+    ('memchr_large', 'evex512'): 'avx2', ('strnlen_large', 'evex512'): 'avx2', ('memcmp_large', 'evex512'): 'avx2',
 }
 
 # (spec, config) -> the set length strspn's and strcspn's short spec ends at, the long one taking the longer
