@@ -31,15 +31,15 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-PRIMS = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr']
-SLOTS = PRIMS + ['copy_large', 'fill_large', 'memcmp_large', 'strlen_tail', 'strcmp_tail', 'strcpy_long', 'copy_huge', 'fill_huge', 'memchr_large']
+PRIMS = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'strnlen']
+SLOTS = PRIMS + ['copy_large', 'fill_large', 'memcmp_large', 'strlen_tail', 'strcmp_tail', 'strcpy_long', 'copy_huge', 'fill_huge', 'memchr_large', 'strnlen_large']
 ISA_FLAGS = {'sse2': ['-march=x86-64'], 'ssse3': ['-march=x86-64', '-mssse3'], 'sse42': ['-march=x86-64-v2'],
              'avx2': ['-march=x86-64-v3'], 'evex': ['-march=x86-64-v4', '-mprefer-vector-width=256'],
              'evex512': ['-march=x86-64-v4', '-mprefer-vector-width=512']}
 ISA_NEEDS = {'sse2': [], 'ssse3': ['F_SSSE3'], 'sse42': ['F_SSE42'], 'avx2': ['F_AVX2'], 'evex': ['F_AVX512'], 'evex512': ['F_AVX512'], 'rep': []}
 LLVM_LEVELS = {'v2': ['F_SSE42'], 'v3': ['F_AVX2'], 'v4': ['F_AVX512']}
 # derived.c's functions in the mix (kl.h's D_*, the same order): every library's own
-DERIVED = ['bcmp', 'bcopy', 'bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat', 'strpbrk', 'strsep', 'strtok', 'strtok_r', 'memmem', 'strstr']
+DERIVED = ['bcmp', 'bcopy', 'bzero', 'mempcpy', 'strncat', 'strlcpy', 'strlcat', 'strpbrk', 'strsep', 'strtok', 'strtok_r', 'memmem', 'strstr']
 FREEBSD_UNITS = ['amd64/string/' + n for n in ('memcpy.S', 'memmove.S', 'memset.S', 'memcmp.S', 'strlen.S', 'strcmp.S', 'stpcpy.S', 'strcat.S',
                                                'strcpy.c', 'strspn.S', 'strcspn.S', 'strchrnul.S', 'memchr.S', 'bcmp.S', 'bcopy.c', 'bzero.c',
                                                'strlcat.c', 'strlcpy.S', 'strncat.c', 'strnlen.c', 'strpbrk.c', 'strsep.c', 'memccpy.S')]

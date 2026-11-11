@@ -37,9 +37,10 @@
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "kbench: %s:%d: %s\n", __FILE__, __LINE__, #x); exit(2); } } while (0)
 
-static const char *PN[P_N] = {"memcpy", "memmove", "memset", "memcmp", "strlen", "strcpy", "strcat", "strcmp", "strspn", "strcspn", "memchr"};
-static const char *SLOTN[] = {"memcpy", "memmove", "memset", "memcmp", "strlen", "strcpy", "strcat", "strcmp", "strspn", "strcspn", "memchr",
-                              "copy_large", "fill_large", "memcmp_large", "strlen_tail", "strcmp_tail", "strcpy_long", "copy_huge", "fill_huge", "memchr_large"};
+static const char *PN[P_N] = {"memcpy", "memmove", "memset", "memcmp", "strlen", "strcpy", "strcat", "strcmp", "strspn", "strcspn", "memchr", "strnlen"};
+static const char *SLOTN[] = {"memcpy", "memmove", "memset", "memcmp", "strlen", "strcpy", "strcat", "strcmp", "strspn", "strcspn", "memchr", "strnlen",
+                              "copy_large", "fill_large", "memcmp_large", "strlen_tail", "strcmp_tail", "strcpy_long", "copy_huge", "fill_huge", "memchr_large",
+                              "strnlen_large"};
 #define NSLOTS ((int)(sizeof(struct str_table) / sizeof(void *)))
 #define SLOT(f) ((int)(offsetof(struct str_table, f) / sizeof(void *)))
 
@@ -62,8 +63,8 @@ typedef char *(*f_sep)(char **, const char *);
 typedef char *(*f_tok)(char *, const char *);
 typedef char *(*f_tok_r)(char *, const char *, char **);
 typedef void *(*f_memmem)(const void *, size_t, const void *, size_t);
-static const char *DN[D_N] = {"bcmp", "bcopy", "bzero", "mempcpy", "strnlen", "strncat", "strlcpy", "strlcat", "strpbrk", "strsep", "strtok", "strtok_r",
-                              "memmem", "strstr"};
+static const char *DN[D_N] = {"bcmp", "bcopy", "bzero", "mempcpy", "strncat", "strlcpy", "strlcat", "strpbrk", "strsep", "strtok", "strtok_r", "memmem",
+                              "strstr"};
 
 /* ------------------------------------------------------------------ host */
 
@@ -249,6 +250,7 @@ static int prim_slots(int p, int *out) {
     case P_STRCAT: out[n++] = SLOT(strlen); out[n++] = SLOT(strcpy); out[n++] = SLOT(strlen_tail); out[n++] = SLOT(strcpy_long); break;
     case P_STRCMP: out[n++] = SLOT(strcmp_tail); break;
     case P_MEMCHR: out[n++] = SLOT(memchr_large); break;
+    case P_STRNLEN: out[n++] = SLOT(strnlen_large); break;
     default: break;
     }
 
@@ -610,6 +612,27 @@ static int vcase(const Kernel *k, u8x *s, size_t sroom, u8x *d, size_t droom, si
         return 1;
     }
 
+    case P_STRNLEN: {
+        fill_pattern(s, n, 5);
+        s[n] = 0;
+        f_nlen f = (f_nlen)k->fn;
+        size_t r = f((char *)s, n + 1);
+
+        if (r != n) {
+            VFAIL("%zu with the NUL within the limit", r);
+        }
+
+        if (f((char *)s, n) != n || f((char *)s, n / 2) != n / 2 || f((char *)s, 0) != 0) {
+            VFAIL("the limit does not cut");
+        }
+
+        if (f((char *)s, SIZE_MAX) != n) {
+            VFAIL("%zu for SIZE_MAX", f((char *)s, SIZE_MAX));
+        }
+
+        return 1;
+    }
+
     case P_STRCPY: {
         fill_pattern(s, n, 9);
         s[n] = 0;
@@ -957,7 +980,7 @@ static int validate_kernel(Kernel *k) {
             break; /* below */
         }
 
-        int str = k->prim == P_STRLEN || k->prim == P_STRCPY || k->prim == P_STRCMP;
+        int str = k->prim == P_STRLEN || k->prim == P_STRNLEN || k->prim == P_STRCPY || k->prim == P_STRCMP;
         size_t ls = n + (str ? 1 : 0), ld = n + (k->prim == P_STRCPY || k->prim == P_STRCMP ? 1 : 0);
         u8x *ss[2] = {A.hi - ls, A.lo}, *dd[2] = {B.hi - ld, B.lo};
 
@@ -1118,6 +1141,7 @@ __attribute__((noinline)) static void run(const Kernel *k, const Cell *c, size_t
     case P_STRCMP: { f_scmp f = (f_scmp)k->fn; LOOP((intptr_t)f((char *)s + off, (char *)d + off)); break; }
     case P_STRSPN: case P_STRCSPN: { f_spn f = (f_spn)k->fn; const char *set = c->set; LOOP(f((char *)s + off, set)); break; }
     case P_MEMCHR: { f_chr f = (f_chr)k->fn; int v = c->c; LOOP(f(s + off, v, n)); break; }
+    case P_STRNLEN: { f_nlen f = (f_nlen)k->fn; size_t lim = c->c ? n : n + 64; LOOP(f((char *)s + off, lim)); break; }
     }
 #undef LOOP
     vsink += acc;
@@ -1365,6 +1389,7 @@ static int scenarios(int p, const char **out) {
     case P_MEMCMP: case P_STRCMP: out[0] = "equal"; out[1] = "diff_first"; out[2] = "diff_last"; return 3;
     case P_STRSPN: case P_STRCSPN: for (int i = 0; i < 6; i++) out[i] = set_names[i]; return 6;
     case P_MEMCHR: out[0] = "absent"; out[1] = "last"; return 2;
+    case P_STRNLEN: out[0] = "nul"; out[1] = "cut"; return 2; /* the NUL at n within the limit; the limit n cutting a longer string */
     default: out[0] = "full"; return 1;
     }
 }
@@ -1466,6 +1491,11 @@ static void setup(Cell *c, const Align *al) {
             c->s[n - 1] = 0xfe;
         }
 
+        break;
+    case P_STRNLEN:
+        fill_pattern(c->s, n, 5);
+        c->s[n] = 0;
+        c->c = !strcmp(c->scenario, "cut"); /* the limit n, else n + 64 */
         break;
     }
 }
@@ -1607,6 +1637,7 @@ static inline __attribute__((always_inline)) uint64_t trace_body(const Kernel *k
         case W_STRCMP: sum += (uint64_t)(sgn(((f_scmp)k->fn)((const char *)src + q->a, (const char *)src + q->b)) + 1); break;
         case W_STRSPN: case W_STRCSPN: sum += ((f_spn)k->fn)((const char *)src + q->a, (const char *)src + q->b); break;
         case W_MEMCHR: { const u8x *r = ((f_chr)k->fn)(src + q->a, (int)q->b, q->n); sum += r ? (uint64_t)(r - (src + q->a)) : q->n; break; }
+        case W_STRNLEN: sum += ((f_nlen)k->fn)((const char *)src + q->a, q->n); break;
         }
     }
 
@@ -1812,8 +1843,8 @@ static void library(const char *name, const char *prefix, int noop) {
 
     if (noop) {
         void *const f[] = {(void *)noop_cpy, (void *)noop_cpy, (void *)noop_set, (void *)noop_cmp, (void *)noop_len, (void *)noop_scpy,
-                           (void *)noop_scpy, (void *)noop_scmp, (void *)noop_spn, (void *)noop_spn, (void *)noop_chr};
-        void *const g[D_N] = {(void *)noop_cmp, (void *)noop_bcopy, (void *)noop_bzero, (void *)noop_cpy, (void *)noop_nlen, (void *)noop_ncat,
+                           (void *)noop_scpy, (void *)noop_scmp, (void *)noop_spn, (void *)noop_spn, (void *)noop_chr, (void *)noop_nlen};
+        void *const g[D_N] = {(void *)noop_cmp, (void *)noop_bcopy, (void *)noop_bzero, (void *)noop_cpy, (void *)noop_ncat,
                               (void *)noop_lcpy, (void *)noop_lcpy, (void *)noop_pbrk, (void *)noop_sep, (void *)noop_tok, (void *)noop_tok_r,
                               (void *)noop_memmem, (void *)noop_pbrk};
         memcpy(&x->t, f, sizeof f);
@@ -1880,9 +1911,9 @@ static void build_tables(void) {
     snprintf(g->name, sizeof g->name, "glibc/dispatch");
     void *const pub[] = {resolved_glibc((void *)memcpy), resolved_glibc((void *)memmove), resolved_glibc((void *)memset), resolved_glibc((void *)memcmp),
                          resolved_glibc((void *)strlen), resolved_glibc((void *)strcpy), resolved_glibc((void *)strcat), resolved_glibc((void *)strcmp),
-                         resolved_glibc((void *)strspn), resolved_glibc((void *)strcspn), resolved_glibc((void *)memchr)};
+                         resolved_glibc((void *)strspn), resolved_glibc((void *)strcspn), resolved_glibc((void *)memchr), resolved_glibc((void *)strnlen)};
     void *const der[D_N] = {resolved_glibc((void *)bcmp), resolved_glibc((void *)bcopy), resolved_glibc((void *)bzero), resolved_glibc((void *)mempcpy),
-                            resolved_glibc((void *)strnlen), resolved_glibc((void *)strncat), resolved_glibc((void *)strlcpy), resolved_glibc((void *)strlcat),
+                            resolved_glibc((void *)strncat), resolved_glibc((void *)strlcpy), resolved_glibc((void *)strlcat),
                             resolved_glibc((void *)strpbrk), resolved_glibc((void *)strsep), resolved_glibc((void *)strtok), resolved_glibc((void *)strtok_r),
                             resolved_glibc((void *)memmem), resolved_glibc((void *)strstr)};
     memcpy(&g->t, pub, sizeof pub);
@@ -1998,7 +2029,7 @@ static inline __attribute__((always_inline)) uint64_t mixed_body(const struct st
         case W_BCOPY: ((f_bcopy)d[D_BCOPY])(src + q->a, dst + q->b, q->n); sum += q->n; break;
         case W_BZERO: ((f_bzero)d[D_BZERO])(dst + q->b, q->n); sum += q->n; break;
         case W_MEMPCPY: sum += (uintptr_t)((f_cpy)d[D_MEMPCPY])(dst + q->b, src + q->a, q->n) - (uintptr_t)(dst + q->b); break;
-        case W_STRNLEN: sum += ((f_nlen)d[D_STRNLEN])((const char *)src + q->a, q->n); break;
+        case W_STRNLEN: sum += t->strnlen((const char *)src + q->a, q->n); break;
         case W_STRNCAT: dst[q->b + (q->n & 0xffff)] = 0; sum += (uintptr_t)((f_ncat)d[D_STRNCAT])((char *)dst + q->b, (const char *)src + q->a, q->n >> 16) - (uintptr_t)(dst + q->b); break;
         case W_STRLCPY: sum += ((f_lcpy)d[D_STRLCPY])((char *)dst + q->b, (const char *)src + q->a, q->n); break;
         case W_STRLCAT: dst[q->b + (q->n & 0xffff)] = 0; sum += ((f_lcpy)d[D_STRLCAT])((char *)dst + q->b, (const char *)src + q->a, q->n >> 16); break;
@@ -2054,7 +2085,7 @@ static int rec_slot(int op) {
     static const int slot[] = {[W_MEMCPY] = P_MEMCPY, [W_MEMMOVE] = P_MEMMOVE, [W_MEMMOVE_OVL] = P_MEMMOVE, [W_MEMSET] = P_MEMSET, [W_MEMCMP] = P_MEMCMP,
                                [W_STRLEN] = P_STRLEN, [W_STRCPY] = P_STRCPY, [W_STRCAT] = P_STRCAT, [W_STRCMP] = P_STRCMP, [W_STRSPN] = P_STRSPN,
                                [W_STRCSPN] = P_STRCSPN, [W_MEMCHR] = P_MEMCHR, [W_MEMCPY_DST] = P_MEMCPY, [W_BCMP] = P_N + D_BCMP,
-                               [W_BCOPY] = P_N + D_BCOPY, [W_BZERO] = P_N + D_BZERO, [W_MEMPCPY] = P_N + D_MEMPCPY, [W_STRNLEN] = P_N + D_STRNLEN,
+                               [W_BCOPY] = P_N + D_BCOPY, [W_BZERO] = P_N + D_BZERO, [W_MEMPCPY] = P_N + D_MEMPCPY, [W_STRNLEN] = P_STRNLEN,
                                [W_STRNCAT] = P_N + D_STRNCAT, [W_STRLCPY] = P_N + D_STRLCPY, [W_STRLCAT] = P_N + D_STRLCAT, [W_STRPBRK] = P_N + D_STRPBRK,
                                [W_STRSEP] = P_N + D_STRSEP, [W_STRTOK] = P_N + D_STRTOK, [W_STRTOK_R] = P_N + D_STRTOK_R, [W_MEMMEM] = P_N + D_MEMMEM,
                                [W_STRSTR] = P_N + D_STRSTR};
@@ -2204,7 +2235,7 @@ static int trace_prim(const char *full) {
 
     static const struct { const char *t; int p; } map[] = {{"memcpy", P_MEMCPY}, {"memmove", P_MEMMOVE}, {"memset", P_MEMSET}, {"memcmp", P_MEMCMP},
         {"strlen", P_STRLEN}, {"strcpy", P_STRCPY}, {"strcat", P_STRCAT}, {"strcmp", P_STRCMP}, {"strspn", P_STRSPN}, {"strcspn", P_STRCSPN},
-        {"memchr", P_MEMCHR}, {"strspn_long", P_STRSPN}, {"strcspn_long", P_STRCSPN}};
+        {"memchr", P_MEMCHR}, {"strnlen", P_STRNLEN}, {"strspn_long", P_STRSPN}, {"strcspn_long", P_STRCSPN}};
 
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) {
         if (!strcmp(map[i].t, name)) {

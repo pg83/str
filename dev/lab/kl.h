@@ -4,7 +4,7 @@
 #define KL_H
 #include <stddef.h>
 
-enum { P_MEMCPY, P_MEMMOVE, P_MEMSET, P_MEMCMP, P_STRLEN, P_STRCPY, P_STRCAT, P_STRCMP, P_STRSPN, P_STRCSPN, P_MEMCHR, P_N };
+enum { P_MEMCPY, P_MEMMOVE, P_MEMSET, P_MEMCMP, P_STRLEN, P_STRCPY, P_STRCAT, P_STRCMP, P_STRSPN, P_STRCSPN, P_MEMCHR, P_STRNLEN, P_N };
 
 /* What a kernel needs from the host. F_AVX2 stands for x86-64-v3 (AVX2, BMI1/2,
    LZCNT, MOVBE, FMA), F_AVX512 for x86-64-v4 (AVX-512 F/BW/VL/CD/DQ). */
@@ -31,7 +31,7 @@ typedef struct {
 /* derived.c's functions that allocate nothing, in the workload's mix: ours
    (str_*, through str_table) and the other libraries' by their prefix, by
    name, not validated (the mixed trace's checksum against glibc is the check). */
-enum { D_BCMP, D_BCOPY, D_BZERO, D_MEMPCPY, D_STRNLEN, D_STRNCAT, D_STRLCPY, D_STRLCAT, D_STRPBRK, D_STRSEP, D_STRTOK, D_STRTOK_R, D_MEMMEM, D_STRSTR, D_N };
+enum { D_BCMP, D_BCOPY, D_BZERO, D_MEMPCPY, D_STRNCAT, D_STRLCPY, D_STRLCAT, D_STRPBRK, D_STRSEP, D_STRTOK, D_STRTOK_R, D_MEMMEM, D_STRSTR, D_N };
 
 typedef struct {
     const char *origin; /* ours, base, freebsd, musl, llvm (glibc's come by their C names) */

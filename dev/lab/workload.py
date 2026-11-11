@@ -64,7 +64,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 OPS = ['memcpy', 'memmove', 'memmove_overlap', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'memcpy_dst',
        'bcmp', 'bcopy', 'bzero', 'mempcpy', 'strnlen', 'strncat', 'strlcpy', 'strlcat', 'strpbrk', 'strsep', 'strtok', 'strtok_r', 'memmem', 'strstr']
-PRIMITIVES = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr']
+PRIMITIVES = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strcpy', 'strcat', 'strcmp', 'strspn', 'strcspn', 'memchr', 'strnlen']
 # the weights of the mix, a float each
 MIX = {'memcpy': 25.0, 'strlen': 20.0, 'strcmp': 12.0, 'memset': 10.0, 'memcmp': 10.0, 'strcpy': 8.0, 'strcspn': 5.0, 'memmove': 5.0, 'memchr': 5.0,
        'strspn': 3.0, 'strcat': 2.0,

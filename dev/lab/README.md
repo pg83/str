@@ -1,7 +1,7 @@
 # The kernel lab
 
 Every implementation of every primitive (`memcpy memmove memset memcmp strlen
-strcpy strcat strcmp strspn strcspn memchr`) is a *kernel*: validated, then
+strcpy strcat strcmp strspn strcspn memchr strnlen`) is a *kernel*: validated, then
 timed over sizes, alignments and workload traces, on every host we have.
 A kernel is the unit, not a library: each glibc IFUNC variant, each of our
 configurations and slot choices, each new idea in `kernels/`.
@@ -28,7 +28,7 @@ ix run lib/c bld/compiler -- ./build lab_canary     # kernels broken on purpose:
 ## The kernels
 
 - **glibc 2.44** (Debian's static `libc.a`, also kbench's C runtime): every IFUNC
-  variant of the eleven primitives, the `_rtm` ones too (glibc runs them on
+  variant of the twelve primitives, the `_rtm` ones too (glibc runs them on
   CPUs with RTM, Broadwell among them).
 - **ours**: every configuration of `str_configs` as dispatch installs it
   (`ours/evex512`, the post pass's copies with direct calls); the host's
@@ -76,7 +76,9 @@ caches all of it by content.
   a page end).
 - **The matrix**: scenarios (memmove disjoint and overlapping by ±1 and ±n/2;
   memset a byte and zero; memcmp/strcmp equal, differing first and last;
-  strspn/strcspn sets of 1, 4, 16 and 32 bytes; memchr absent and last),
+  strspn/strcspn sets of 1, 4, 16 and 32 bytes; memchr absent and last;
+  strnlen with the NUL at n within the limit and with the limit n cutting a
+  longer string),
   sizes (`full`: 0..64 each, then to 1 MiB, 115 points; `quick`: 34), offset
   pairs (22 for two pointers, 14 for one; `pe` ends the object at a page end).
   In a cell all kernels of the primitive in a shuffled order per round, a
@@ -143,7 +145,8 @@ caches all of it by content.
   at the host's level, musl, asmlib, each with its own function for every
   primitive and for every derived function (ours through the table, as
   derived.c calls them; the others' by name, `lab.py DERIVED`, taken as they
-  are: the mixed trace's checksum against glibc is their check), on the
+  are: the mixed trace's checksum against glibc is their check; strnlen is a
+  primitive since 2026-11-11, validated and in the matrix like memchr), on the
   mixed trace and every function's trace; noop measures the stand's own
   cost per call, which `libs.py` subtracts. A library runs a trace only with
   a valid function for every call in it.
