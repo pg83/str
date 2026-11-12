@@ -60,9 +60,8 @@ def entry_slot(img, addr):
 
 def derived_callees(img, spec, func, callees):
     """derived.c's: each callee an entry point that jumps through its slot, every configuration's
-    implementation there proved by the slot's specs among the callees' proofs; malloc the C
-    library's, taken by its contract. The table the constructor installs (before it runs the
-    plain sse2 functions are there, no proof's)."""
+    implementation there proved by the slot's specs among the callees' proofs. The table the
+    constructor installs (before it runs the plain sse2 functions are there, no proof's)."""
     import prove
     import targets
     proved = {}
@@ -74,8 +73,6 @@ def derived_callees(img, spec, func, callees):
     slots, missing = table_slots(), []
     for t in prove.contract_callees(spec, img, img.symbols[func]):
         n = names.get(t, hex(t))
-        if n == 'malloc' and img.symbols.get('malloc') == t:
-            continue
         k = entry_slot(img, t)
         if k is None or k >= len(slots) or n != 'str_' + slots[k]:
             missing.append('%s: not the jump through its slot' % n)

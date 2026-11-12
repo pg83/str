@@ -10,8 +10,9 @@ builtin SIMD operations, compiled by the project's Python compiler, and
 dispatched once by `cpuid` through one table of primitives. Made of these
 (`derived.c`): `bcmp`, `bcopy`, `bzero`, `explicit_bzero`, `mempcpy`,
 `strncat`, `strlcpy`, `strlcat`, `strpbrk`, `strsep`, `strtok`, `strtok_r`,
-`strdup`, `strndup`, `memmem`, `strstr`. The archive is one
-object; meant to be linked into a static libc in place of its string
+`memmem`, `strstr`. The archive is one object and takes no name from
+outside (`strdup` and `strndup`, which need `malloc`, are left to the C
+library); meant to be linked into a static libc in place of its string
 routines.
 
 ## Build

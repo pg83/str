@@ -2236,7 +2236,7 @@ class TruffleScan32:
 
 # ------------------------------------------------------------ derived.c
 
-DERIVED_ENTRIES = ('str_memchr', 'str_strnlen', 'str_strlen', 'str_strspn', 'str_strcspn', 'str_memcpy', 'str_memmove', 'str_memset', 'str_memcmp', 'malloc')
+DERIVED_ENTRIES = ('str_memchr', 'str_strnlen', 'str_strlen', 'str_strspn', 'str_strcspn', 'str_memcpy', 'str_memmove', 'str_memset', 'str_memcmp')
 
 
 class Obj:
@@ -2272,8 +2272,7 @@ class Over:
     what the spec says of it instanced at the objects' stops (strlen's a NUL
     at or before any NUL of the string; memchr's at or before the bounded
     object's stop, and without one the stop at n), memcpy's bytes the
-    destination's memory from then on; malloc's answer null or an object of
-    the size asked, apart. A jump to one (a tail call) is checked for its
+    destination's memory from then on. A jump to one (a tail call) is checked for its
     arguments and the state it leaves; the rest is the callee's. The objects
     are regions of their own, apart, in user space; the function's own loads
     and stores inside what each allows; at the return the answer and every
@@ -2289,7 +2288,6 @@ class Over:
         self.maxlen, self.induct = maxlen, induct
         self.objs, self.regions, self.assume = [], [], []
         self.calls = 0
-        self.alloc = self.msize = None
         self.inset = var('inset', 256)
 
     def setup(self, a, align):
@@ -2349,20 +2347,12 @@ class Over:
         self.place(o, o.read)
         return o
 
-    def allocation(self):
-        """What malloc gives: null, or the size asked of its own (the region set aside)."""
-        self.alloc = self.obj('m')
-        return self.alloc
-
     def owner_of(self, addr):
         for o in self.objs:
             off = X.offset_from(addr, o.base)
             if off is not None:
                 return o, off
         return None, None
-
-    def write_of(self, o):
-        return self.msize if o is self.alloc else o.write
 
     def early(self, a, n):
         """The function's own load past what its object lets be read."""
@@ -2377,7 +2367,7 @@ class Over:
         o, off = self.owner_of(a)
         if o is None:
             raise Failure('a store to no object at %#x' % rip)
-        w = self.write_of(o)
+        w = o.write
         return S.and_(c, S.not_(fits(off, nb, w if w is not None else const(64, 0))))
 
     # ---- the callees by their contracts
@@ -2494,7 +2484,7 @@ class Over:
         os_, xs = self.owner_of(s)
         if od is None or os_ is None or od is os_:
             raise Failure('memcpy between %r and %r' % (d, s))
-        w = self.write_of(od)
+        w = od.write
         out = [('memcpy writes inside what %s allows' % od.name, [S.not_(fits(xd, n, w if w is not None else const(64, 0)))]),
                ('memcpy reads inside what %s allows' % os_.name, [S.not_(fits(xs, n, os_.read))])]
         if self.tail(st):
@@ -2524,16 +2514,6 @@ class Over:
     def tail_args(self, st, name):
         raise Failure('a jump to %s' % name)
 
-    def c_malloc(self, prover, st):
-        """malloc(n): null, or an object of n bytes of its own."""
-        if self.alloc is None or self.tail(st) or self.calls_of(st, 'malloc'):
-            raise Failure('malloc where the spec has none')
-        n, m = st.gpr['rdi'], self.alloc.base
-        self.msize = n
-        st.pc.append(S.or_(S.is_zero(m), S.and_(S.ule(const(64, USER_LO), m), S.ult(n, const(64, USER_HI - USER_LO)), S.ule(S.add(m, n), const(64, USER_HI)))))
-        self.log(st, 'malloc', n)
-        self.returns(st, m)
-
     # ---- at the return
 
     def final(self, st, o):
@@ -2548,7 +2528,7 @@ class Over:
     def unchanged(self, st, *changed):
         out = []
         for o in self.objs:
-            if o not in changed and o is not self.alloc and self.final(st, o) is not o.arr:
+            if o not in changed and self.final(st, o) is not o.arr:
                 out += self.memory_is(st, o, lambda x, o=o: S.select(o.arr, x), '%s unchanged' % o.name)
         return out
 
@@ -2701,54 +2681,6 @@ class OverStrpbrk(Over):
             self.unchanged(st), self.show()
 
 
-class OverStrdup(Over):
-    """strdup(s): null when malloc's answer is; else a jump to memcpy(m, s,
-    L + 1), m malloc's answer for L + 1 bytes (L: strlen's), which copies s
-    and its NUL there and gives m."""
-
-    def objects(self, a):
-        self.s = self.string('s')
-        self.allocation()
-        return [self.s.base]
-
-    def tail_args(self, st, name):
-        if name != 'memcpy':
-            raise Failure('a jump to %s' % name)
-        n1 = S.add(self.one(st, 'strlen')[3], const(64, 1))
-        size = self.one(st, 'malloc')[1]
-        ok = S.and_(S.eq(st.gpr['rdi'], self.alloc.base), S.eq(st.gpr['rsi'], self.s.base), S.eq(st.gpr['rdx'], n1))
-        return [('malloc asked for s and its NUL', [S.not_(S.eq(size, n1))]), ('the jump to memcpy(m, s, L + 1)', [S.not_(ok)]),
-                ('m not null there', [S.is_zero(self.alloc.base)])]
-
-    def obligations(self, st):
-        self.one(st, 'malloc')
-        return (self.answer(st, const(64, 0), 'the answer null') + [('malloc\'s answer null there', [S.not_(S.is_zero(self.alloc.base))])]
-                + self.unchanged(st)), self.show()
-
-
-class OverStrndup(Over):
-    """strndup(s, n): l strnlen's answer from s; null when malloc's
-    answer (for l + 1 bytes) is; else m with s's l bytes and a NUL."""
-
-    def objects(self, a):
-        self.n = var('n', 64)
-        self.s = self.bounded('s', self.n)
-        self.allocation()
-        return [self.s.base, self.n]
-
-    def obligations(self, st):
-        _, _, f, r = self.one(st, 'strnlen')
-        l1 = S.add(S.ite(f, r, self.n), const(64, 1))
-        out = [('malloc asked for l + 1 bytes', [S.not_(S.eq(self.one(st, 'malloc')[1], l1))])]
-        if not self.calls_of(st, 'memcpy'):
-            return (out + self.answer(st, const(64, 0), 'the answer null') + [('malloc\'s answer null there', [S.not_(S.is_zero(self.alloc.base))])]
-                    + self.unchanged(st)), self.show()
-        l = S.sub(l1, const(64, 1))
-        want = lambda x: S.ite(S.ult(x, l), S.select(self.s.arr, x), const(8, 0))  # noqa: E731
-        return (out + self.answer(st, self.alloc.base, 'the answer m') + self.memory_is(st, self.alloc, want, 'm: s\'s l bytes and a NUL', upto=l1)
-                + self.unchanged(st)), self.show()
-
-
 class TokenSpec(Over):
     """strsep, strtok_r and strtok: past a token's start t in string o,
     strcspn's answer r2 from there: at t + r2 a NUL and the char * cell
@@ -2862,7 +2794,7 @@ SPECS = {'strlen': Strlen, 'strlen_tail': StrlenTail, 'memchr': Memchr, 'memchr_
          'memset': Fill, 'fill_large': FillLarge, 'memcpy': Copy,
          'memmove': Move, 'copy_large': CopyLarge, 'memcmp': Compare, 'memcmp_large': MemcmpLarge, 'strcmp': StrCompare, 'strcmp_tail': StrCompare, 'strcpy': StrCopy, 'strcpy_long': StrCopyLong, 'strcat': StrCat, 'strspn': Span, 'strcspn': Cspan, 'strspn_long': SpanLong, 'strcspn_long': CspanLong, 'truffle_scan': TruffleScan, 'truffle_scan32': TruffleScan32,
          'bcmp': OverBcmp, 'bcopy': OverBcopy, 'bzero': OverBzero, 'explicit_bzero': OverBzero, 'mempcpy': OverMempcpy, 'strncat': OverStrncat, 'strlcpy': OverStrlcpy, 'strlcat': OverStrlcat, 'strpbrk': OverStrpbrk, 'strsep': OverStrsep, 'strtok_r': OverStrtokR,
-         'strtok': OverStrtok, 'strdup': OverStrdup, 'strndup': OverStrndup}
+         'strtok': OverStrtok}
 
 
 def contract_stops(spec, img, entry):

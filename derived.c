@@ -2,9 +2,10 @@
  * derived.c: the rest of string.h and strings.h that is made of the
  * primitives: every function here reaches memory only through the str_*
  * entry points (so through the table: any configuration, any mix of its
- * slots) and its own few loads and stores, and calls nothing of a C library
- * but malloc (strdup, strndup). Compiled once, for baseline x86-64: the
- * work is the primitives'.
+ * slots) and its own few loads and stores, and calls nothing of a C library:
+ * strdup and strndup, which would need malloc, are left to it, so the
+ * archive takes no name from outside. Compiled once, for baseline x86-64:
+ * the work is the primitives'.
  *
  * memmem and strstr scan for the needle's first byte and compare at each
  * place it is found; when that does much more work than it advances (the
@@ -14,8 +15,6 @@
  * (SSE2, the baseline: this unit's own loads, in their pages).
  */
 #include "common.h"
-
-void *malloc(size_t);
 
 int str_bcmp(const void *a, const void *b, size_t n) {
     return str_memcmp(a, b, n);
@@ -130,25 +129,6 @@ static char *strtok_last;
 
 char *str_strtok(char *s, const char *sep) {
     return str_strtok_r(s, sep, &strtok_last);
-}
-
-char *str_strdup(const char *s) {
-    size_t n = str_strlen(s) + 1;
-    char *d = malloc(n);
-    return d ? str_memcpy(d, s, n) : 0;
-}
-
-char *str_strndup(const char *s, size_t n) {
-    size_t l = str_strnlen(s, n);
-    char *d = malloc(l + 1);
-
-    if (!d) {
-        return 0;
-    }
-
-    str_memcpy(d, s, l);
-    d[l] = 0;
-    return d;
 }
 
 /* ------------------------------------------------------------ two-way */

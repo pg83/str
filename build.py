@@ -191,7 +191,7 @@ proof_elf = command(
     outputs=["$(B)/proof/libstr.elf"],
     deps=[libstr],
     cmd=["clang", "--no-default-config", "-fuse-ld=lld", "-nostdlib", "-static", "-Wl,--whole-archive", "$(B)/libstr.a", "-Wl,--no-whole-archive",
-         "-Wl,-e,0", "-Wl,--unresolved-symbols=ignore-all", "-o", "$(B)/proof/libstr.elf"],
+         "-Wl,-e,0", "-o", "$(B)/proof/libstr.elf"],
     descr="LD",
     color="cyan",
 )

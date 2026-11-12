@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-EXTERNAL = {'malloc'}  # the C library's: strdup's and strndup's allocation, the one name the archive takes from outside
+EXTERNAL = set()  # the archive takes no name from outside (strdup and strndup, which would need malloc, are the libc's)
 sys.path.insert(0, str(ROOT / 'dev'))
 os.environ['OPT_VERIFY'] = '1'
 import x86  # noqa: E402

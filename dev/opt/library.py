@@ -17,8 +17,8 @@ Built for wasm2o (abi='wasm2o', mir.WASM2O), the code keeps the registers of
 the code wasm2o compiles and the object is one its loader links (pizdos,
 bin/wasm2o): the read-only data in one .rodata, no constructor, an .eh_frame
 with the stack pointer at every instruction, nothing outside it; derived.c is
-left out (strdup calls malloc). The loader calls str_choose and binds the
-public slots of the table it returns."""
+left out (the loader binds only the table's slots). The loader calls str_choose
+and binds the public slots of the table it returns."""
 import json
 import struct
 from pathlib import Path
@@ -302,7 +302,7 @@ def build_object(modules, functions, api, abi='sysv'):
                 raise ValueError('a displacement past 32 bits at %#x' % at)
             text[at:at + 4] = (d & 0xffffffff).to_bytes(4, 'little')
         elif symbol in by_name or symbol in data_names or not any(symbol == f.name for m in modules.values() for f in m.functions.values()):
-            relocs.append(Reloc(at, rtype, symbol, addend))  # an address taken, the data, or outside (malloc)
+            relocs.append(Reloc(at, rtype, symbol, addend))  # an address taken, the data, or outside
         else:
             raise ValueError('%s: %s refers to %s, which is not emitted' % (unit, mf.name, symbol))
     obj.sections = {'.text': Section('.text', 'SHT_PROGBITS', 6, 64, bytes(text), relocs=relocs), **obj.sections}

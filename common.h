@@ -147,8 +147,6 @@ char *str_strpbrk(const char *, const char *);
 char *str_strsep(char **, const char *);
 char *str_strtok_r(char *, const char *, char **);
 char *str_strtok(char *, const char *);
-char *str_strdup(const char *);
-char *str_strndup(const char *, size_t);
 void *str_memmem(const void *, size_t, const void *, size_t);
 char *str_strstr(const char *, const char *);
 

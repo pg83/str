@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/resource.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -953,15 +952,6 @@ static void derived(void) {
         CHECK(D(str_strlcat)((char *)d, (char *)s, n + 1) == n && !memcmp(d, s, n + 1));
         d[0] = 0;
         CHECK(D(str_strncat)((char *)d, (char *)s, SIZE_MAX) == (char *)d && !memcmp(d, s, n + 1));
-        char *dup = D(str_strdup)((char *)s);
-        CHECK(dup && !strcmp(dup, (char *)s));
-        free(dup);
-        dup = D(str_strndup)((char *)s, n + 50);
-        CHECK(dup && strlen(dup) == n && !memcmp(dup, s, n));
-        free(dup);
-        dup = D(str_strndup)((char *)s, n / 2);
-        CHECK(dup && strlen(dup) == n / 2 && !memcmp(dup, s, n / 2));
-        free(dup);
         CHECK(D(str_strpbrk)((char *)s, "\x01\x02") == strpbrk((char *)s, "\x01\x02"));
 
         for (size_t nl = 1; nl <= n && nl <= 40; nl += 1 + nl / 4) {
@@ -991,30 +981,6 @@ static void derived(void) {
     CHECK(D(str_strlcat)(text, "xyz", 1) == 4 && !strcmp(text, "ab"));
     CHECK(D(str_strncat)(text, "xyz", 0) == text && !strcmp(text, "ab"));
     CHECK(D(str_bcmp)(text, "zz", 0) == 0);
-    char *dup = D(str_strndup)("abc", 0);
-    CHECK(dup && dup[0] == 0);
-    free(dup);
-    /* malloc failing: the address space limited to what the process has plus
-       16 MiB, a copy of a 64 MiB string asked for */
-    {
-        struct rlimit old, lim;
-        size_t big = (size_t)64 << 20;
-        char *s = malloc(big + 1);
-        CHECK(s && !getrlimit(RLIMIT_AS, &old));
-        memset(s, 'a', big);
-        s[big] = 0;
-        long pages = 0;
-        FILE *f = fopen("/proc/self/statm", "r");
-        CHECK(f && fscanf(f, "%ld", &pages) == 1);
-        fclose(f);
-        lim.rlim_cur = (rlim_t)pages * 4096 + ((rlim_t)16 << 20);
-        lim.rlim_max = old.rlim_max;
-        CHECK(!setrlimit(RLIMIT_AS, &lim));
-        char *d1 = D(str_strdup)(s), *d2 = D(str_strndup)(s, big);
-        CHECK(!setrlimit(RLIMIT_AS, &old));
-        CHECK(!d1 && !d2);
-        free(s);
-    }
 
     munmap(g - 4096, 4 * 4096);
     munmap(gd - 4096, 4 * 4096);
