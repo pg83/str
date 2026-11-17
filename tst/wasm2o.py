@@ -5,8 +5,10 @@ nothing outside, only PC32 and 64-bit relocations; every function an FDE whose C
 the code at every instruction (rsp + 8 at the entry and at every return, every push, pop and
 adjustment of rsp counted, a jump landing where its target's CFA is); no instruction naming
 rbp, r13, r14, r15 or vector register 15; rbx and r9-r12 pushed by the prologue of a function
-that uses them; no access of the stack needing more alignment than its 8 bytes; and
-str_choose there, for the loader to call.
+that uses them; no access of the stack needing more alignment than its 8 bytes; no chain
+of calls deeper in the stack than the code that calls ours leaves it without a check; and
+for the loader str_choose and str_dispatch, derived.c's functions, and no strtok: its
+pointer would be every process's of the one copy.
 
     wasm2o.py --object .build/wasm2o/post/libstr.o"""
 import argparse
@@ -28,6 +30,11 @@ for n in range(9, 13):
 # aligned moves fault on a memory operand that is not aligned to its size
 ALIGNED = re.compile(r'^(v?movdqa(32|64)?|v?movap[sd]|v?movntdq[a]?|v?movntp[sd])$')
 LEGACY_SSE = re.compile(r'^(p[a-z]+|movdq[au]|movap[sd]|movup[sd]|pcmpistr[im])$')
+
+# The code wasm2o compiles checks its stack as Go's does and calls ours with no check of ours:
+# into the room Go keeps under every checked frame for the functions that check none, 800
+# bytes (StackNosplit), the return address of that call the first 8.
+NOSPLIT = 800
 
 failures = 0
 
@@ -125,12 +132,26 @@ def regs_of(j):
 
 
 def check_function(name, start, code, changes):
+    """The function against the contract; the stack it uses itself below its entry's rsp, and
+    its calls and jumps out: (what is below the entry's rsp where the target starts, the target:
+    an address, or the instruction of a call through memory)."""
     insns = x86.decode(code, start)
     at_offset = {j['offset']: j for j in insns}
     pushed, prologue = set(), True
+    deepest, calls = 0, []
     for j in insns:
         here = j['offset'] - start
         cfa = cfa_at(changes, here)
+        deepest = max([deepest, cfa - 8] + [cfa - 8 - o['mem']['disp'] for o in j['ops']
+                                             if o['kind'] == 'Memory' and o['mem']['base'] == 'rsp' and o['mem']['disp'] < 0])
+        if j['mnemonic'] in ('call', 'jmp') and j['ops']:
+            below, to = cfa if j['mnemonic'] == 'call' else cfa - 8, j['ops'][0]
+            if to['kind'] == 'Memory':
+                calls.append((below, j))
+            elif to['kind'] != 'NearBranch':
+                fail('%s+%#x: %s goes where a register says' % (name, here, j['gas']))
+            elif not start <= to['branch'] < start + len(code) or j['mnemonic'] == 'call':
+                calls.append((below, to['branch']))
         after = cfa_at(changes, here + j['len']) if here + j['len'] < len(code) else None
         m = j['mnemonic']
         regs = regs_of(j)
@@ -173,6 +194,51 @@ def check_function(name, start, code, changes):
                     fail('%s+%#x: a jump from CFA rsp+%d to rsp+%d' % (name, here, cfa, cfa_at(changes, target - start)))
             elif m == 'jmp' and cfa != 8:
                 fail('%s+%#x: a tail jump with the CFA at rsp+%d' % (name, here, cfa))
+    return deepest, calls
+
+
+def through_table(elf, text, rodata, j):
+    """Where a call or a jump through memory may go: the memory is a slot of str_table, and
+    the slot is any configuration's."""
+    by_name = {s.name: s for s in elf.symbols if s.type == 'STT_OBJECT'}
+    table, configs = by_name.get('str_table'), by_name.get('str_configs')
+    r = next((r for r in elf.relocs.get(text, []) if j['offset'] <= r.offset < j['offset'] + j['len']), None)
+    if r is None or table is None or configs is None or elf.symbols[r.symbol].name != 'str_table':
+        return None
+    slot = r.addend + j['offset'] + j['len'] - r.offset
+    if slot % 8 or not 0 <= slot < table.size:
+        return None
+    each = 16 + table.size      # a configuration: its name, its needs, its table
+    places = {table.value + slot} | {configs.value + k * each + 16 + slot for k in range(configs.size // each)}
+    return [elf.symbols[q.symbol].value + q.addend for q in elf.relocs.get(rodata, []) if q.offset in places]
+
+
+def check_depths(elf, text, rodata, names, used):
+    """No function's deepest chain of calls past what the caller left: used is
+    {start: (its own depth, its calls)}."""
+    depth, entered = {}, set()
+
+    def of(start):
+        if start in depth:
+            return depth[start]
+        if start in entered or start not in used:
+            fail('%s: a call around to itself, or to no function' % names.get(start, hex(start)))
+            return 0
+        entered.add(start)
+        own, calls = used[start]
+        for below, to in calls:
+            targets = [to] if isinstance(to, int) else through_table(elf, text, rodata, to)
+            if targets is None:
+                fail('%s+%#x: %s goes through memory that is no slot of str_table' % (names[start], to['offset'] - start, to['gas']))
+                continue
+            own = max([own] + [below + of(t) for t in targets])
+        depth[start] = own
+        return own
+
+    for start in sorted(used):
+        if 8 + of(start) > NOSPLIT:
+            fail('%s: %d bytes of stack, the caller left %d' % (names[start], 8 + of(start), NOSPLIT))
+    return max(depth.values(), default=0) + 8
 
 
 def main():
@@ -184,7 +250,7 @@ def main():
     alloc = sorted(s.name for s in elf.sections if s.flags & 2)
     if alloc != ['.eh_frame', '.rodata', '.text']:
         fail('allocated sections %s, not .text, .rodata and .eh_frame' % alloc)
-    text, eh = names.get('.text'), names.get('.eh_frame')
+    text, eh, rodata = names.get('.text'), names.get('.eh_frame'), names.get('.rodata')
     for index, relocs in elf.relocs.items():
         for r in relocs:
             if r.type not in ('R_X86_64_PC32', 'R_X86_64_64'):
@@ -196,16 +262,22 @@ def main():
     functions = sorted((s.value, s.size, s.name) for s in elf.symbols if s.type == 'STT_FUNC' and s.shndx == text)
     if sorted(frames) != [start for start, _, _ in functions]:
         fail('%d functions, %d FDEs, not one at each entry' % (len(functions), len(frames)))
+    used = {}
     for start, size, name in functions:
         frame = frames.get(start)
         if frame is None:
             continue
         if frame[0] != size:
             fail('%s: the FDE covers %d bytes of %d' % (name, frame[0], size))
-        check_function(name, start, code[start:start + size], frame[1])
-    if not any(s.name == 'str_choose' and s.type == 'STT_FUNC' and s.bind == 'STB_GLOBAL' for s in elf.symbols):
-        fail('no global str_choose')
-    print('%d functions, %d FDEs: %d failures' % (len(functions), len(frames), failures))
+        used[start] = check_function(name, start, code[start:start + size], frame[1])
+    deepest = check_depths(elf, text, rodata, {start: name for start, _, name in functions}, used)
+    api = {s.name for s in elf.symbols if s.type == 'STT_FUNC' and s.bind == 'STB_GLOBAL'}
+    for name in ('str_choose', 'str_dispatch', 'str_strstr', 'str_memmem', 'str_strpbrk', 'str_strtok_r', 'str_mempcpy'):
+        if name not in api:
+            fail('no global %s' % name)
+    if any(s.name == 'str_strtok' for s in elf.symbols):
+        fail('str_strtok is there: its pointer would be every process\'s')
+    print('%d functions, %d FDEs, %d bytes of stack at the deepest: %d failures' % (len(functions), len(frames), deepest, failures))
     sys.exit(1 if failures else 0)
 
 

@@ -125,11 +125,16 @@ char *str_strtok_r(char *s, const char *sep, char **last) {
     return s;
 }
 
+/* strtok's pointer is its process's. One copy of the library that serves
+   many processes (STR_SHARED: pizdos's loader's, every program's) keeps
+   none: strtok there is its caller's own, by strtok_r. */
+#ifndef STR_SHARED
 static char *strtok_last;
 
 char *str_strtok(char *s, const char *sep) {
     return str_strtok_r(s, sep, &strtok_last);
 }
+#endif
 
 /* ------------------------------------------------------------ two-way */
 

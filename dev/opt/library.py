@@ -15,10 +15,14 @@ the table and the configurations, derived.c); every other name local.
 
 Built for wasm2o (abi='wasm2o', mir.WASM2O), the code keeps the registers of
 the code wasm2o compiles and the object is one its loader links (pizdos,
-bin/wasm2o): the read-only data in one .rodata, no constructor, an .eh_frame
-with the stack pointer at every instruction, nothing outside it; derived.c is
-left out (the loader binds only the table's slots). The loader calls str_choose
-and binds the public slots of the table it returns."""
+bin/wasm2o): the data in one .rodata, no constructor, an .eh_frame with the
+stack pointer at every instruction, nothing outside it. The loader does the
+constructor's work: it calls str_dispatch once, the data still writable, and
+seals it; derived.c's functions call through the table that call filled,
+the host's. One copy serves every process there, so derived.c is compiled
+STR_SHARED, without strtok, whose pointer would be all of theirs. The loader
+calls str_choose and binds the public slots of the table it returns, and
+derived.c's functions by their names."""
 import json
 import struct
 from pathlib import Path
@@ -154,7 +158,9 @@ def compile_library(source, archive, out=None, defines=None, phases=None, abi='s
 
 
 def build_library(source, archive, out, defines, phases, abi):
-    units = [(u, isa) for u, isa in UNITS if abi != 'wasm2o' or u != 'derived']
+    units = UNITS
+    if abi == 'wasm2o':
+        defines = {**(defines or {}), 'STR_SHARED': '1'}
     source, archive = Path(source), Path(archive)
     out = Path(out) if out is not None else archive.parent / 'post'
     out.mkdir(parents=True, exist_ok=True)
@@ -331,10 +337,10 @@ def build_object(modules, functions, api, abi='sysv'):
 
 
 def for_wasm2o(obj, regions):
-    """The object as wasm2o's loader takes it: the data, read-only, in one .rodata (the table
-    str_dispatch would write is not written there: the loader calls str_choose), the
-    constructor and the stack note dropped, and an .eh_frame of the regions. Nothing may
-    be outside: the loader resolves no symbol of the library."""
+    """The object as wasm2o's loader takes it: the data in one .rodata, which the loader seals
+    once it has called str_dispatch (the table that call writes is all the code ever
+    writes there), the constructor and the stack note dropped, and an .eh_frame of the
+    regions. Nothing may be outside: the loader resolves no symbol of the library."""
     merged, data, relocs, align = {}, bytearray(), [], 16
     for name, section in obj.sections.items():
         if name in ('.text', '.init_array', '.note.GNU-stack'):
