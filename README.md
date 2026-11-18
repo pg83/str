@@ -23,18 +23,6 @@ routines.
 ./build -j8 checks             # compiler tests, C test driver, decoder round-trip, the wasm2o contract
 ```
 
-`libstr_wasm2o` (`strcc.py --abi wasm2o`) compiles the library in the
-convention of the code [pizdos](https://github.com/pizd0s/kernel)'s wasm2o
-compiles, for its loader to link: arguments in `rax`, `rcx`, `rdx`, `rsi`,
-`rdi`, `r8`, `rbx` and `r9`-`r12` kept, `rbp`, `r13`-`r15` and vector
-register 15 never touched, no stack alignment assumed, an `.eh_frame` for
-the goroutine stacks it runs on, and no chain of calls deeper than the 800
-bytes Go leaves a function that checks no stack. One copy of the object
-serves every process there, so it has no `strtok`, whose pointer is a
-process's. The loader calls `str_dispatch` once before it seals the data,
-which `derived.c`'s functions call through from then on, and calls the
-public slots of the table `str_choose` returns directly.
-
 ## Results
 
 Time per call on the workload of `dev/lab`, relative to glibc on the same
